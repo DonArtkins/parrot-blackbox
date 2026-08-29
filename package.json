@@ -1,0 +1,58 @@
+{
+  "name": "parrot-blackbox",
+  "version": "1.0.0",
+  "description": "parrot-blackbox — crash-proof, multi-cloud backup & recovery automation for Parrot OS. Daily/weekly off-disk backups with automatic catch-up, smart storage across many MEGA + Google Drive accounts, Timeshift snapshot backups and one-command restore.",
+  "type": "module",
+  "main": "src/cli.js",
+  "bin": {
+    "parrot-blackbox": "bin/parrot-blackbox.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:sandbox": "node --test test/e2e.test.js",
+    "publish:dry-run": "npm publish --dry-run --access public",
+    "prepublishOnly": "npm test",
+    "release:patch": "npm test && npm version patch -m \"chore(release): %s\" && git push --follow-tags",
+    "release:minor": "npm test && npm version minor -m \"chore(release): %s\" && git push --follow-tags",
+    "release:major": "npm test && npm version major -m \"chore(release): %s\" && git push --follow-tags"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DonArtkins/parrot-blackbox.git"
+  },
+  "homepage": "https://github.com/DonArtkins/parrot-blackbox#readme",
+  "bugs": {
+    "url": "https://github.com/DonArtkins/parrot-blackbox/issues"
+  },
+  "keywords": [
+    "backup",
+    "recovery",
+    "snapshot",
+    "timeshift",
+    "mega",
+    "google-drive",
+    "rclone",
+    "parrot",
+    "parrot-os",
+    "linux",
+    "automation",
+    "crash-proof",
+    "cli",
+    "wizard"
+  ],
+  "author": "Don Artkins (https://github.com/DonArtkins)",
+  "license": "MIT",
+  "dependencies": {
+    "@clack/prompts": "^0.7.0",
+    "citty": "^0.2.2",
+    "execa": "^8.0.1",
+    "picocolors": "^1.1.1"
+  }
+}

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Sandbox systemctl stub — pretends user-unit management succeeds.
+set -u
+exit 0

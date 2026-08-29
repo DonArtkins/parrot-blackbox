@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Sandbox rclone stub — simulates MEGA / Google Drive remotes backed by local
+# dirs under $PBB_SANDBOX_CLOUD, with per-remote quotas enforced on write.
+set -u
+CLOUD_ROOT="${PBB_SANDBOX_CLOUD:-$PWD/.sandbox-cloud}"
+if [ ! -d "$CLOUD_ROOT" ]; then echo "rclone-stub: no cloud root" >&2; exit 1; fi
+
+# Translate 'remote:path' to the local dir that backs the remote.
+stub_path() {
+  local r="$1"
+  local name="${r%%:*}"
+  local rest="${r#*:}"
+  rest="${rest#/}"
+  echo "$CLOUD_ROOT/$name/$rest"
+}
+
+cmd="$1"; shift
+case "$cmd" in
+  version) echo "rclone v1.68.0 (sandbox stub)"; exit 0 ;;
+  listremotes)
+    for r in "$CLOUD_ROOT"/*/; do
+      [ -d "$r" ] || continue
+      echo "$(basename "$r"):"
+    done
+    exit 0 ;;
+  about)
+    remote="${1%:}"; shift
+    json=0; for a in "$@"; do [ "$a" = "--json" ] && json=1; done
+    dir="$CLOUD_ROOT/$remote"
+    total=$(cat "$CLOUD_ROOT/$remote.quota" 2>/dev/null || echo 10737418240)
+    used=$(du -sb "$dir" 2>/dev/null | cut -f1); used=${used:-0}
+    free=$(( total - used )); [ $free -lt 0 ] && free=0
+    if [ "$json" = "1" ]; then
+      echo "{\"total\":$total,\"used\":$used,\"free\":$free}"
+    else
+      echo "Total: $total bytes, Used: $used, Free: $free"
+    fi
+    exit 0 ;;
+  mkdir)
+    mkdir -p "$(stub_path "$1")"; exit $? ;;
+  copy|copyto)
+    src="$1"; dest="$2"
+    if [[ "$src" == *:* && "$dest" != *:* ]]; then
+      # remote -> local (restore)
+      srcp=$(stub_path "$src")
+      cp -f "$srcp" "$dest" || { echo "rclone-stub: copy from $src failed" >&2; exit 1; }
+      exit 0
+    fi
+    # local -> remote, with quota enforcement
+    lp=$(stub_path "$dest")
+    mkdir -p "$(dirname "$lp")"
+    remote="${dest%%:*}"
+    used=$(du -sb "$CLOUD_ROOT/$remote" 2>/dev/null | cut -f1); used=${used:-0}
+    total=$(cat "$CLOUD_ROOT/$remote.quota" 2>/dev/null || echo 10737418240)
+    add=$(stat -c%s "$src")
+    if [ $(( used + add )) -gt $total ]; then
+      echo "rclone-stub: insufficient quota on $remote ($used + $add > $total)" >&2
+      exit 1
+    fi
+    cp -f "$src" "$lp"
+    exit $? ;;
+  cat)
+    cat "$(stub_path "$1")" 2>/dev/null || exit 1
+    exit 0 ;;
+  lsjson)
+    target="$1"
+    lp=$(stub_path "$target")
+    if [ ! -d "$lp" ]; then echo "[]"; exit 0; fi
+    items=$(find "$lp" -mindepth 1 -printf '%y|%p|%s\n' | while IFS='|' read -r type p sz; do
+      rel="${p#$lp/}"
+      if [ "$type" = "d" ]; then
+        echo "{\"Path\":\"$rel\",\"Name\":\"$(basename "$p")\",\"IsDir\":true,\"Size\":0},"
+      else
+        echo "{\"Path\":\"$rel\",\"Name\":\"$(basename "$p")\",\"IsDir\":false,\"Size\":$sz},"
+      fi
+    done)
+    items=${items%,}
+    echo "[$items]"
+    exit 0 ;;
+  purge|delete)
+    rm -rf "$(stub_path "$1")"; exit 0 ;;
+  *) echo "rclone-stub: unknown command $cmd" >&2; exit 1 ;;
+esac

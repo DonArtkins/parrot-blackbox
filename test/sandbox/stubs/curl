@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Sandbox curl stub — always "online" (tests override via PBB_NETWORK).
+set -u
+exit 0

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Sandbox sudo stub — presumes the password is already cached, unless
+# PBB_SUDO_REFUSE=1 (then -n calls fail like a lapsed sudo timestamp).
+set -u
+if [ "${PBB_SUDO_REFUSE:-0}" = "1" ]; then
+  echo "[sudo] password for sandbox:" >&2
+  exit 1
+fi
+if [ "$1" = "-n" ]; then shift; fi
+if [ $# -eq 0 ]; then exit 0; fi
+cmd="$1"; shift
+exec "$cmd" "$@"

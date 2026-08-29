@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Sandbox timeshift stub — BTRFS-like snapshots under PBB_TIMESHIFT_DIR/snapshots.
+set -u
+TS_DIR="${PBB_TIMESHIFT_DIR:-/timeshift}"
+SNAP_DIR="$TS_DIR/snapshots"
+LOG="${PBB_SANDBOX_LOG:-/tmp/pbb-log}"
+mkdir -p "$SNAP_DIR"
+log() { echo "timeshift $*" >> "$LOG"; }
+
+cmd="$1"; shift
+case "$cmd" in
+  --list)
+    log list
+    find "$SNAP_DIR" -mindepth 1 -maxdepth 1 -type d | sort | while read -r d; do
+      name=$(basename "$d")
+      date=${name%_*}
+      datets=${name#*_}
+      time=${datets//-/:}
+      echo "$date $time W $name $d"
+    done
+    exit 0 ;;
+  --create)
+    comment=""; tags=""; while [ $# -gt 0 ]; do case "$1" in
+      --comments) comment="$2"; shift 2 ;;
+      --tags) tags="$2"; shift 2 ;;
+      *) shift ;;
+    esac; done
+    name=$(date +%Y-%m-%d_%H-%M-%S)
+    mkdir -p "$SNAP_DIR/$name/etc"
+    echo "$comment" > "$SNAP_DIR/$name/etc/snapshot-comment"
+    echo "$tags" > "$SNAP_DIR/$name/system-tags"
+    echo "state-marker" > "$SNAP_DIR/$name/etc/hostname"
+    log "create $name comment=$comment"
+    echo "Created new snapshot: $name"
+    exit 0 ;;
+  --delete)
+    snap=""; while [ $# -gt 0 ]; do case "$1" in
+      --snapshot) snap="$2"; shift 2 ;;
+      *) shift ;;
+    esac; done
+    log "delete $snap"
+    rm -rf "$SNAP_DIR/$snap"
+    exit 0 ;;
+  --restore)
+    snap=""; while [ $# -gt 0 ]; do case "$1" in
+      --snapshot) snap="$2"; shift 2 ;;
+      --yes|--skip-grub-config|--skip-grub|--reboot|-y) shift ;;
+      *) shift ;;
+    esac; done
+    log "restore $snap"
+    echo "Restoring snapshot... $snap"
+    exit 0 ;;
+  *) echo "timeshift-stub: unknown $cmd" >&2; exit 1 ;;
+esac
