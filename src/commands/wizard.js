@@ -51,7 +51,7 @@ async function addAccountAction() {
       message: 'Which provider?',
       options: [
         { value: 'mega', label: 'MEGA (20 GB free tier)' },
-        { value: 'gdrive', label: 'Google Drive (10 GB free tier)' },
+        { value: 'gdrive', label: 'Google Drive (15 GB free tier)' },
         { value: 'back', label: '← Back' },
       ],
     });

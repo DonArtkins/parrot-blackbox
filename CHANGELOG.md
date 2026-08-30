@@ -65,7 +65,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Background daemon** — detached process with a 60s poll, offline/online edge
   detection, journal, atomic state and a process lock (stale-lock reclaim).
 - **Smart multi-cloud storage pool** — register any number of MEGA and Google
-  Drive accounts (rclone remotes) as one pool (~150 GB across 5+5 accounts);
+  Drive accounts (rclone remotes) as one pool (~175 GB across 5+5 accounts);
   placement water-fills accounts by used-percentage; anything bigger than a
   single account's free space is split into byte-range chunks spread across
   accounts with a restore manifest (cloud + local mirror).

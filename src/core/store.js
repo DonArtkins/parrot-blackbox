@@ -52,7 +52,7 @@ export function defaultConfig() {
       chunkSize: 2 * GiB,
       providers: {
         mega: { defaultQuotaGiB: 20 },
-        gdrive: { defaultQuotaGiB: 10 },
+        gdrive: { defaultQuotaGiB: 15 },
       },
       accounts: [], // {id, provider, label, remote, quotaGiB?}
     },

@@ -16,7 +16,7 @@ Parrot install died" — a single CLI + background daemon that:
    missed backups are run **in order, oldest first, the moment WiFi is back**.
    Every job is journalled and retried; a lock prevents collisions; state is
    written atomically. Nothing is silently lost.
-4. **Manages ~150 GB of free cloud storage for you** — 5 MEGA + 5 Google Drive
+4. **Manages ~175 GB of free cloud storage for you** — 5 MEGA + 5 Google Drive
    accounts are connected as one pool. Files are placed whole on whichever
    account has the most relative headroom; anything bigger than a single
    account's free space is split into byte-range chunks across accounts and a
@@ -436,13 +436,14 @@ y/e> y                                       ⬅ y confirms permanent deletion
 ## How the smart storage pool works
 
 ```
-5 MEGA      (20 GiB each)
-5 Drive     (10 GiB each)
+5 MEGA      (20 GiB each)     = 100 GiB
+5 Drive     (15 GiB each)     =  75 GiB   ← Google Drive free tier is 15 GiB
 ──────────────────────────────
-≈ 150 GiB managed automatically
+≈ 175 GiB managed automatically
 ```
 
-- Every account is exactly one rclone remote (`mega-1:`, `drive-2:` …).
+(Your live `account list` proves it: 10 accounts → 175 GiB total.)
+Every account is exactly one rclone remote (`mega-1:`, `gdrive-6:` …).
 - Each backup has **one manifest** that records where every file (or chunk) is.
 - Placement picks the account that would end up with the **lowest used
   percentage** (water-filling), then most free.
