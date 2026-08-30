@@ -19,6 +19,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Streamlined setup wizard** — no more raw 68-option `rclone config` menu in
   the default path; pick MEGA or Drive and type your credentials.
 - **Module-integrity regression test** guarding against the scoping bug.
+- **README documents the complete manual `rclone config` flow** — every menu
+  letter (`e`/`n`/`d`/`r`/`c`/`s`/`q`), the storage numbers to choose
+  (Mega = **39**, Google Drive = **24**), what "user name" means (your email),
+  the password/2FA prompts, the "**say no to advanced config**" guidance, and
+  how to edit / rename / delete remotes afterwards.
 
 ## [1.0.0] - 2026-08-29
 
