@@ -3,6 +3,14 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.4] - 2026-08-30
+
+### Fixed
+- **Google Drive quota is 15 GiB, not 10 GiB** — the real free tier. The
+  fallback default quota, provider labels and docs are aligned, so a pool of
+  5 MEGA + 5 Google Drive accounts reports the true **~175 GiB** total
+  (verified live: `account list` → 10 accounts, 175 GiB total).
+
 ## [1.0.3] - 2026-08-30
 
 ### Added
@@ -81,6 +89,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   rclone/timeshift/sudo binaries and a fake cloud, so the Level-5 destructive
   paths are proven safe before any real use.
 
+[1.0.4]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.4
 [1.0.3]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.3
 [1.0.2]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.2
 [1.0.1]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.1
