@@ -67,21 +67,21 @@ sudo apt install rclone timeshift git curl
 npm install -g parrot-blackbox
 ```
 
-Run the setup wizard — it does the whole install for you:
+Run it — you land in the **menu wizard** (just like gitswitch):
 
 ```bash
 parrot-blackbox
 ```
 
-**What the wizard does, start to finish:**
-1. **Checks + auto-installs** `rclone`, `timeshift`, `git`, `curl` (interactive
-   sudo prompt, the gitswitch/theamify way).
-2. **Adds your cloud accounts for you** — pick MEGA or Google Drive and enter
-   your email/password; parrot-blackbox creates the rclone remote and registers
-   it in the pool. No raw 68-option `rclone config` menu needed.
-3. Confirms the **schedule** (snapshot every Saturday 22:00).
-4. Installs the **always-on service** (systemd / cron).
-5. Offers to run your **first snapshot** right away.
+**On every launch the wizard:**
+1. **Checks npm for the latest version** and offers to self-update
+   (`npm install -g parrot-blackbox@latest`) if a newer one is published — the
+   latest always comes from the npm registry, never from local state.
+2. Shows a **menu with every feature**: add account, storage pool, check &
+   install tools, snapshot now, run backup, list backups, restore, always-on
+   service, daemon, guided setup, status, doctor, **repair**, **update**,
+   **uninstall**. Choosing an action runs it and returns to the menu — saying
+   "No" to a prompt never kicks you out; only **Exit** / **Ctrl+C** leaves.
 
 ---
 
@@ -403,7 +403,11 @@ y/e> y                                       ⬅ y confirms permanent deletion
 
 | Command | What it does |
 |---|---|
-| `parrot-blackbox` | Interactive setup wizard (checks & **auto-installs** needed tools) |
+| `parrot-blackbox` | ⭐ **Menu wizard** — every feature in one menu; automatic update check on launch |
+| `parrot-blackbox install` | Same as the menu wizard |
+| `parrot-blackbox repair [--yes]` | Fix a broken install (tools, config, service, pool) |
+| `parrot-blackbox update [--force]` | Check npm & update to the latest published version |
+| `parrot-blackbox setup` | Guided full setup (tools, accounts, schedule, service) |
 | `parrot-blackbox run` | Run any due/pending backups now (safe for cron) |
 | `parrot-blackbox force` | ⭐ Run every enabled backup NOW (default = weekly snapshot) `[sudo]` |
 | `parrot-blackbox snapshot now` | Create + upload a Weekly Timeshift snapshot `[sudo]` |

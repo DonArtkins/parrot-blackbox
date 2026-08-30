@@ -3,6 +3,28 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-08-30
+
+### Added
+- **Menu wizard (gitswitch-style)** — running `parrot-blackbox` (or
+  `parrot-blackbox install`) opens a menu with EVERY feature: add account,
+  storage pool, check & install tools, snapshot now, run backup, list backups,
+  restore, always-on service, daemon, guided setup, status, doctor, **repair**,
+  **update**, **uninstall**. Choosing an action runs it and returns to the menu;
+  saying "No" to a prompt never kicks you out. Only Exit / Ctrl+C leaves.
+- **Automatic update check on launch** — the wizard queries the npm registry
+  (`npm view parrot-blackbox version`, never local state) and offers to
+  self-update when a newer version is published. `update` / `self-update` /
+  `upgrade` commands work standalone too.
+- **`repair` command** — fixes a broken install: re-checks & auto-installs
+  system tools, recreates a missing/corrupt config, re-installs the always-on
+  service if missing, drops stale pool entries whose rclone remote no longer
+  exists, and offers an optional npm reinstall. Run standalone
+  (`parrot-blackbox repair`, `--yes` for non-interactive) or from the menu.
+- **Full uninstall** — now also removes the npm package itself
+  (`npm uninstall -g parrot-blackbox`), so the command disappears from PATH,
+  matching gitswitch/theamify.
+
 ## [1.0.2] - 2026-08-30
 
 ### Added
@@ -59,6 +81,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   rclone/timeshift/sudo binaries and a fake cloud, so the Level-5 destructive
   paths are proven safe before any real use.
 
+[1.0.3]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.3
 [1.0.2]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.2
 [1.0.1]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.1
 [1.0.0]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.0

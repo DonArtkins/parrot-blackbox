@@ -26,6 +26,23 @@ test('wizard module integrity: runSetup and registration helpers are top-level',
   assert.ok(!/referenceerror.*not defined/i.test(JSON.stringify(setupMod)), 'no ReferenceError baked in');
 });
 
+test('menu wizard + repair + self-update are all exported and parse as ESM', async () => {
+  const wizard = await import('../src/commands/wizard.js');
+  const manage = await import('../src/commands/manage.js');
+  const self = await import('../src/lib/self.js');
+  const tools = await import('../src/commands/tools.js');
+  assert.equal(typeof wizard.runWizard, 'function', 'menu wizard exported');
+  assert.equal(typeof manage.runRepair, 'function', 'repair exported');
+  assert.equal(typeof manage.runUninstallWizard, 'function', 'uninstall exported');
+  assert.equal(typeof self.runSelfUpdate, 'function', 'update exported');
+  assert.equal(typeof self.compareVersions, 'function', 'version compare exported');
+  assert.equal(typeof tools.runToolsCheck, 'function', 'tools check exported');
+  assert.deepEqual(tools.REQUIRED.map((t) => t.bin), ['rclone', 'timeshift', 'git', 'curl']);
+  assert.equal(self.compareVersions('1.0.2', '1.0.1'), 1);
+  assert.equal(self.compareVersions('1.0.1', '1.0.2'), -1);
+  assert.equal(self.compareVersions('1.0.2', '1.0.2'), 0);
+});
+
 const at = { hour: 22, minute: 0 };
 
 test('dailyDues lists every 22:00 slot strictly after from, <= to', () => {

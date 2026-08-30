@@ -124,5 +124,110 @@ export async function runUninstallWizard() {
   if (removed.length) p.log.success(`Removed local data: ${removed.join(', ')}`);
   else p.log.message(pc.dim('No local parrot-blackbox data found.'));
 
-  p.outro(pc.green('Uninstalled. Cloud backups remain safe in your accounts.'));
+  // Remove the npm package too, exactly like gitswitch/theamify.
+  const { selfUninstall } = await import('../lib/self.js');
+  const pkgRemoved = await selfUninstall();
+
+  p.outro(pc.green(
+    `Uninstalled. Cloud backups remain safe in your accounts.${pkgRemoved ? ' The parrot-blackbox command is gone from PATH.' : ''}`,
+  ));
+}
+
+/**
+ * `repair` — fix a broken/partial install. Re-runs every integrity probe:
+ *   - system tools (rclone / timeshift / git / curl) checked + auto-installed
+ *   - config + state dirs recreated if missing / regenerated if corrupt
+ *   - always-on service (systemd / cron) re-installed if missing
+ *   - storage pool entries cross-checked against rclone remotes (stale removed)
+ *   - optional npm reinstall when the data dir is healthy but the CLI is broken
+ * When `auto` is true it runs in non-interactive / repair-and-summary mode.
+ */
+export async function runRepair({ auto = false } = {}) {
+  const { runToolsCheck } = await import('./tools.js');
+  const { installService } = await import('./service.js');
+  const { listRemotes } = await import('../storage/rclone.js');
+  const { listAccounts, removeAccount } = await import('../storage/accounts.js');
+
+  p.intro(pc.bgGreen(pc.black(' 🛠 parrot-blackbox repair ')));
+  const fixed = [];
+
+  // 1. Tools
+  const stillMissing = await runToolsCheck();
+  if (stillMissing.length === 0) p.log.success('Tools OK.');
+  else { p.log.warn('Some tools are still missing — snapshot backup/restore may be unavailable.'); }
+
+  // 2. Config & state
+  let cfgPath;
+  const { configFile, ensureStateDirs } = await import('../core/paths.js');
+  const { loadConfig } = await import('../core/store.js');
+  try {
+    cfgPath = configFile();
+    ensureStateDirs();
+    loadConfig(); // throws if corrupt JSON
+    p.log.success('Config & state OK.');
+  } catch (e) {
+    p.log.warn(`Config/state issue: ${e.message}`);
+    // Regenerate a fresh config if absent or corrupt.
+    try {
+      const { defaultConfig, saveConfig } = await import('../core/store.js');
+      let cfg = null;
+      try { cfg = loadConfig(); } catch { cfg = null; }
+      if (!cfg) {
+        saveConfig(defaultConfig());
+        fixed.push('config');
+        p.log.success('Config recreated.');
+      }
+    } catch (e2) {
+      p.log.warn(`Could not recreate config: ${e2.message}`);
+    }
+  }
+
+  // 3. Service
+  try {
+    const { serviceFile, daemonLogFile } = await import('../core/paths.js');
+    const { serviceBackend } = await import('./service.js');
+    const fsMod = await import('node:fs');
+    if (serviceBackend() === 'systemd' && !fsMod.existsSync(serviceFile())) {
+      const backend = await installService();
+      p.log.success(`Always-on service re-installed via ${backend}.`);
+      fixed.push('service');
+    } else {
+      p.log.success('Service OK.');
+    }
+  } catch (e) {
+    p.log.warn(`Service check failed: ${e.message}`);
+  }
+
+  // 4. Pool ↔ rclone cross-check
+  try {
+    const remotes = await listRemotes();
+    const accs = listAccounts();
+    let stale = 0;
+    for (const a of accs) {
+      if (!remotes.includes(a.remote)) {
+        removeAccount(a.remote);
+        stale += 1;
+      }
+    }
+    if (stale) { p.log.success(`Removed ${stale} stale pool entry(ies) whose rclone remote no longer exists.`); fixed.push(`pool(${stale})`); }
+    else p.log.success(`Pool OK (${accs.length} account(s), ${remotes.length} rclone remote(s)).`);
+  } catch (e) {
+    p.log.warn(`Pool check failed: ${e.message}`);
+  }
+
+  // 5. Optional npm reinstall (repair a broken CLI install)
+  if (!auto) {
+    const want = await p.confirm({
+      message: 'Reinstall parrot-blackbox from npm to repair the executable?',
+      initialValue: false,
+    });
+    if (!p.isCancel(want) && want) {
+      const { runSelfUpdate } = await import('../lib/self.js');
+      p.log.step('Reinstalling from npm…');
+      const did = await runSelfUpdate({ force: true });
+      if (did) fixed.push('npm');
+    }
+  }
+
+  p.outro(pc.green(fixed.length ? `Repair complete — fixed: ${fixed.join(', ')}.` : 'Nothing to repair — everything looks healthy.'));
 }

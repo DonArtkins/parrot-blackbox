@@ -3,6 +3,9 @@ import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { createRequire } from 'node:module';
 import { runSetup } from './commands/setup.js';
+import { runWizard } from './commands/wizard.js';
+import { runRepair } from './commands/manage.js';
+import { runSelfUpdate } from './lib/self.js';
 import { guidedRemoteAdd, deleteRemote, registerRemotesAsAccounts, remoteStatus } from './commands/remote.js';
 import { runDoctor, runStatus, runUninstallWizard } from './commands/manage.js';
 import { installService, removeService } from './commands/service.js';
@@ -36,7 +39,11 @@ function printUsage() {
 ${pc.bold('parrot-blackbox')} ${pc.dim(`v${pkg.version}`)} — crash-proof multi-cloud backup & recovery for Parrot OS
 
 ${pc.bold('Usage:')}
-  parrot-blackbox                     Interactive setup wizard (checks & installs tools)
+  parrot-blackbox                     ⭐ Menu wizard (all features; auto-update check on launch)
+  parrot-blackbox install             Same as the menu wizard
+  parrot-blackbox repair [--yes]      Fix a broken install (tools, config, service, pool)
+  parrot-blackbox update [--force]    Check npm & update to the latest version
+  parrot-blackbox setup               Guided full setup (tools, accounts, schedule, service)
   parrot-blackbox run                 Run any due / pending backups now (safe for cron)
   parrot-blackbox force               ⭐ Run every enabled backup NOW (default = weekly snapshot)  ${pc.dim('[sudo]')}
   parrot-blackbox snapshot now        Create a weekly snapshot + upload it now  ${pc.dim('[sudo]')}
@@ -349,13 +356,27 @@ const main = defineCommand({
       return;
     }
 
-    if (!cmd) return runSetup();
+    if (!cmd) return runWizard();
 
     switch (cmd) {
       case 'setup':
-      case 'wizard':
-      case 'install':
+        // Guided full setup — a distinct, deeper flow (still menu-accessible).
         return runSetup();
+
+      case 'wizard':
+      case 'menu':
+      case 'install':
+        return runWizard();
+
+      case 'repair':
+      case 'fix':
+        return runRepair({ auto: process.argv.includes('--yes') });
+
+      case 'update':
+      case 'self-update':
+      case 'selfupdate':
+      case 'upgrade':
+        return runSelfUpdate({ force: process.argv.includes('--force') });
 
       case 'run':
         process.exitCode = await invokeRun('noninteractive');

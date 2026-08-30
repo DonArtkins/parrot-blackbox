@@ -417,3 +417,41 @@ test('restore snapshot: downloads cloud snapshot & hands to timeshift --restore'
   assert.equal(accept.exitCode, 0, accept.stdout.substring(0, 500));
   assert.ok(/Restoring|restore/i.test(accept.stdout), accept.stdout);
 });
+test('repair: fixes a broken install (tools, config, service, pool) without hanging', async () => {
+  const s = setupSandbox('repair');
+  populateHome(s);
+  addRemote(s.env, { remote: 'megaRep', quotaGiB: 20 });
+
+  // Simulate a broken install for the pool probe: add a pool account whose
+  // rclone remote does NOT exist. Repair --yes should drop it.
+  const cfgPath = path.join(s.env.PBB_STATE_DIR, 'config.json');
+  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+  fs.writeFileSync(cfgPath, JSON.stringify({
+    storage: { accounts: [{ id: 'dead', provider: 'mega', label: 'dead', remote: 'ghost' }] },
+  }));
+
+  const r = await runCli(['repair', '--yes'], s.env);
+  assert.equal(r.exitCode, 0, r.stdout + r.stderr);
+  assert.ok(/Repair|Tools|Config|Pool|Service/.test(r.stdout), r.stdout.slice(0, 400));
+  // The stale pool entry should be gone.
+  const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  assert.ok(!(cfg.storage.accounts || []).some((a) => a.remote === 'ghost'), 'stale pool entry removed');
+});
+
+test('update: tells you you are current (non-interactive, no hang)', async () => {
+  const s = setupSandbox('update');
+  populateHome(s);
+  // In sandbox PATH there is no npm stub, so this hits the real registry and
+  // reports on-latest (local is 1.0.2) — non-TTY path prints and exits.
+  const r = await runCli(['update'], s.env);
+  assert.equal(r.exitCode, 0, r.stdout + r.stderr);
+  assert.ok(/latest|v1\.0|npm install -g/i.test(r.stdout), r.stdout.slice(0, 400));
+});
+
+test('menu wizard refuses to run when stdin is not a TTY (no hang)', async () => {
+  const s = setupSandbox('menu');
+  populateHome(s);
+  const r = await runCli([], s.env);
+  assert.equal(r.exitCode, 0, r.stdout + r.stderr);
+  assert.ok(/No interactive terminal/i.test(r.stdout), r.stdout.slice(0, 300));
+});
