@@ -3,6 +3,15 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-08-30
+
+### Added
+- **Complete manual `rclone config` walkthrough in the README** — every menu
+  letter (`e`/`n`/`d`/`r`/`c`/`s`/`q`) with what it does, the exact storage
+  numbers (Mega = **39**, Google Drive = **24**), that `user` means the
+  account's **email**, the password / 2FA prompts, the "**say no to advanced
+  config**" guidance, and how to edit / rename / delete remotes afterwards.
+
 ## [1.0.1] - 2026-08-30
 
 ### Fixed
@@ -19,11 +28,6 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Streamlined setup wizard** — no more raw 68-option `rclone config` menu in
   the default path; pick MEGA or Drive and type your credentials.
 - **Module-integrity regression test** guarding against the scoping bug.
-- **README documents the complete manual `rclone config` flow** — every menu
-  letter (`e`/`n`/`d`/`r`/`c`/`s`/`q`), the storage numbers to choose
-  (Mega = **39**, Google Drive = **24**), what "user name" means (your email),
-  the password/2FA prompts, the "**say no to advanced config**" guidance, and
-  how to edit / rename / delete remotes afterwards.
 
 ## [1.0.0] - 2026-08-29
 
@@ -55,5 +59,6 @@ adheres to [Semantic Versioning](https://semver.org/).
   rclone/timeshift/sudo binaries and a fake cloud, so the Level-5 destructive
   paths are proven safe before any real use.
 
+[1.0.2]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.2
 [1.0.1]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.1
 [1.0.0]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.0
