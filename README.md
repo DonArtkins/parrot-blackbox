@@ -61,48 +61,93 @@ sudo apt install rclone timeshift git curl
 
 ---
 
-## Install
+## Install (streamlined)
 
 ```bash
 npm install -g parrot-blackbox
 ```
 
-Run the setup wizard:
+Run the setup wizard — it does the whole install for you:
 
 ```bash
 parrot-blackbox
 ```
 
-**The wizard first checks your system and auto-installs anything needed** for
-snapshot backup + restore (`rclone`, `timeshift`, `git`, `curl` — it detects
-your package manager and runs the install with an interactive sudo prompt,
-the gitswitch/theamify way). Then it walks you through: authorizing your
-MEGA / Drive accounts in `rclone config` → registering each remote as an
-account → installing the always-on service → an optional first snapshot.
+**What the wizard does, start to finish:**
+1. **Checks + auto-installs** `rclone`, `timeshift`, `git`, `curl` (interactive
+   sudo prompt, the gitswitch/theamify way).
+2. **Adds your cloud accounts for you** — pick MEGA or Google Drive and enter
+   your email/password; parrot-blackbox creates the rclone remote and registers
+   it in the pool. No raw 68-option `rclone config` menu needed.
+3. Confirms the **schedule** (snapshot every Saturday 22:00).
+4. Installs the **always-on service** (systemd / cron).
+5. Offers to run your **first snapshot** right away.
 
 ---
 
 ## Quick start (the important bit)
 
 ```bash
-# 1. Install, then run the wizard (installs missing tools for you):
+# 1. Install + run the wizard (installs tools, adds accounts, first snapshot):
 npm install -g parrot-blackbox
 parrot-blackbox
 
-# 2. Create your rclone remotes (one per MEGA / Drive account) if not done:
-rclone config
+# 2. If you have MORE MEGA / Drive accounts, add them the same guided way:
+parrot-blackbox remote add mega          # prompts for email/password
+parrot-blackbox remote add gdrive        # opens browser OAuth
+parrot-blackbox remote list              # see remotes + pool registration
 
-# 3. Add them to the pool (repeat for every account):
-parrot-blackbox account add mega mega-account-1
-parrot-blackbox account add gdrive my-drive-1
-parrot-blackbox account list          # see the whole pool + quota
-
-# 4. Force your FIRST snapshot backup right now (do this before a fresh
-#    install — it captures the whole system and uploads it to the cloud):
+# 3. Force your FIRST snapshot backup right now (or again later — it captures
+#    the whole system and uploads it to the cloud):
 parrot-blackbox force
 ```
 
 `parrot-blackbox status` shows the pool, network state, daemon state, last run
+and pending backups.
+
+---
+
+## Managing cloud accounts (rclone remotes)
+
+Every MEGA / Google Drive login becomes one rclone remote = one pool account.
+`parrot-blackbox` manages them for you — you never need to use the raw rclone
+menu except for advanced edits.
+
+**Add** (guided — creates the remote AND saves it in the pool):
+```bash
+parrot-blackbox remote add mega            # prompts: name, email, password, 2FA (optional)
+parrot-blackbox remote add gdrive          # opens browser OAuth for Google
+parrot-blackbox remote add mega mega-1     # or pass the name directly
+# non-interactive (CI): PBB_MEGA_USER=me@x.com PBB_MEGA_PASS=secret parrot-blackbox remote add mega
+```
+
+**List** (which remotes exist + are registered):
+```bash
+parrot-blackbox remote list
+parrot-blackbox account list               # pool usage & free space
+```
+
+**Edit / rename** any remote (advanced, full rclone editor):
+```bash
+parrot-blackbox remote config              # pick the remote → e) Edit, r) Rename, c) Copy
+```
+
+**Delete** a remote entirely (removes the rclone entry AND its pool account):
+```bash
+parrot-blackbox remote remove <name>
+```
+
+**Already configured rclone remotes?** (e.g. an old `mega:` you created long
+ago) — register them into the pool without recreating:
+```bash
+parrot-blackbox account add mega mega      # provider + existing remote name
+parrot-blackbox account list
+```
+
+rclone stores secrets encrypted in `~/.config/rclone/rclone.conf`; parrot-blackbox
+only ever stores the **remote name + provider + optional quota**, never your
+passwords, and the allocator's manifests are safe to share.
+
 ---
 
 ## Commands
@@ -119,10 +164,14 @@ parrot-blackbox force
 | `parrot-blackbox restore` | Interactive restore wizard `[sudo]` |
 | `parrot-blackbox restore files <id> <dir>` | Recover a file backup into a folder |
 | `parrot-blackbox restore snapshot <id> --yes` | Overwrite the whole system from a cloud snapshot `[sudo]` |
-| `parrot-blackbox account add <mega\|gdrive> <remote>` | Add an account to the pool |
+| `parrot-blackbox account add <mega\|gdrive> <remote>` | Register an existing rclone remote into the pool |
 | `parrot-blackbox account list` | Pool summary + per-account quota |
-| `parrot-blackbox account remove <id>` | Remove an account |
+| `parrot-blackbox account remove <id>` | Remove an account from the pool |
 | `parrot-blackbox account quota <id> <GiB>` | Override an account's quota |
+| `parrot-blackbox remote add <mega\|gdrive> [name]` | ⭐ Add a cloud account (guided — sets up rclone FOR you) |
+| `parrot-blackbox remote list` | Show rclone remotes + pool registration |
+| `parrot-blackbox remote remove <name>` | Delete a remote (rclone + pool) |
+| `parrot-blackbox remote config` | Open the full rclone config editor (advanced) |
 | `parrot-blackbox daemon start\|stop\|status` | Background automation |
 | `parrot-blackbox schedule install\|remove` | systemd / cron always-on setup |
 | `parrot-blackbox doctor` | Full diagnostics |

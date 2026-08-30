@@ -1,19 +1,20 @@
 /**
  * Interactive setup wizard (default command, like gitswitch/theamify).
- * Walks: dependency check + AUTO-INSTALL → rclone remotes (accounts) →
- * schedule overview → always-on service install → optional first backup.
+ * Walks: tools check + AUTO-INSTALL → storage pool (guided MEGA/Drive remote
+ * creation, no raw 68-option rclone menus) → schedule → always-on service →
+ * optional first snapshot.
  */
 
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { execa } from 'execa';
 import { loadConfig, journal, hasCommandSync } from '../core/store.js';
-import { listRemotes } from '../storage/rclone.js';
-import { addAccount, listAccounts, refreshAccounts, poolSummary } from '../storage/accounts.js';
+import { listAccounts, refreshAccounts, poolSummary } from '../storage/accounts.js';
 import { installService } from './service.js';
 import { runDueJobs } from '../daemon/scheduler.js';
 import { isOnline } from '../util/network.js';
 import { bytesHuman } from '../util/misc.js';
+import { guidedRemoteAdd, registerRemotesAsAccounts } from './remote.js';
 
 const REQUIRED = [
   { bin: 'rclone', pkg: 'rclone', why: 'talks to MEGA / Google Drive (cloud storage)' },
@@ -28,12 +29,7 @@ function detectPackageManager() {
   return order.find((name) => hasCommandSync(name)) || null;
 }
 
-/**
- * Auto-install the tools the system needs for snapshot backup & restore.
- * Prompts per missing tool, then runs the package-manager install with an
- * interactive sudo prompt (spinner released first, Ctrl+C safe).
- * @returns {Promise<string[]>} tools that were freshly installed
- */
+/** Auto-install the tools needed for snapshot backup & restore (theamify-style). */
 async function ensureSystemTools() {
   const missing = REQUIRED.filter((t) => !hasCommandSync(t.bin));
   if (missing.length === 0) return [];
@@ -59,7 +55,6 @@ async function ensureSystemTools() {
     p.log.step(`Installing ${pc.cyan(tool.bin)}…`);
     const s = p.spinner();
     s.start(`Installing ${tool.bin}…`);
-    // Release the spinner FIRST so the sudo password prompt is visible & interruptible.
     s.stop('');
     try {
       const args = pm === 'pacman' ? ['-S', '--noconfirm', tool.pkg] : [pm, 'install', '-y', tool.pkg];
@@ -77,58 +72,55 @@ async function ensureSystemTools() {
   }
   return installed;
 }
-export async function runSetup() {
-  p.intro(pc.bgYellow(pc.black(' parrot-blackbox setup ')));
 
-  // 1. Dependencies — check the system and INSTALL anything needed for the
-  //    snapshot to be created, uploaded and (later) RESTORED.
-  p.note('Checking & installing the tools needed for snapshot backup + restore…', 'Step 1/5 — tools');
-  const missing = REQUIRED.filter((t) => !hasCommandSync(t.bin));
-  if (missing.length === 0) {
-    p.log.success(`All tools present: ${REQUIRED.map((r) => r.bin).join(', ')}`);
-  } else {
-    const installed = await ensureSystemTools();
-    const stillMissing = REQUIRED.filter((t) => !hasCommandSync(t.bin));
-    if (installed.length) p.log.success(`Installed: ${installed.join(', ')}`);
-    if (stillMissing.length) {
-      p.log.warn(`Still missing: ${stillMissing.map((m) => m.bin).join(', ')}`);
-    } else {
-      p.log.success(`All required tools now present: ${REQUIRED.map((r) => r.bin).join(', ')}`);
-    }
-  }
-  if (!hasCommandSync('timeshift')) {
-    p.log.message(pc.dim('Timeshift missing = snapshot backup & restore are unavailable. Run `parrot-blackbox` again after installing it.'));
-  }
-
-  // 2. Accounts
-  p.note('Accounts are rclone remotes — one per MEGA or Google Drive login.', 'Step 2/5 — storage pool');
+/** Wizard step: connect cloud accounts (guided or manual). */
+async function storagePoolStep() {
   const existing = listAccounts();
-  const needMore = await p.confirm({
+  p.note(
+    'One MEGA or Google Drive login = one rclone remote = one pool account.',
+    'Step 2/5 — storage pool',
+  );
+  const action = await p.select({
     message: existing.length
-      ? `You already have ${existing.length} account(s). Add or authorize another cloud login?`
-      : 'No accounts yet — add a MEGA or Google Drive account now?',
-    initialValue: true,
+      ? `You already have ${existing.length} account(s). What next?`
+      : 'No accounts yet — how do you want to add your first cloud account?',
+    options: [
+      { value: 'guided', label: 'Add a cloud account (guided — parrot-blackbox sets up rclone for you)', hint: 'recommended' },
+      { value: 'manual', label: 'Configure rclone myself, then register the remote' },
+      existing.length ? { value: 'skip', label: 'Skip — accounts look fine' } : { value: 'skip', label: 'Skip for now' },
+    ],
   });
-  if (p.isCancel(needMore)) { p.cancel('Aborted.'); process.exit(0); }
+  if (p.isCancel(action)) { p.cancel('Aborted.'); process.exit(0); }
 
-  if (needMore) {
-    const want = await p.select({
-      message: 'How do you want to add the account?',
-      options: [
-        { value: 'wizard', label: 'Run `rclone config` (recommended — handles MEGA + Google OAuth)', hint: 'authenticates in your browser' },
-        { value: 'manual', label: 'I already created the rclone remote myself' },
-      ],
-    });
-    if (p.isCancel(want)) { p.cancel('Aborted.'); process.exit(0); }
-
-    if (want === 'wizard') {
-      p.log.step('Starting rclone config — follow its prompts, then come back.');
-      await execa('rclone', ['config'], { stdio: 'inherit' });
+  if (action === 'guided') {
+    const wantMore = true;
+    while (wantMore) {
+      const provider = await p.select({
+        message: 'Which provider?',
+        options: [
+          { value: 'mega', label: 'MEGA (20 GB free tier)' },
+          { value: 'gdrive', label: 'Google Drive (10 GB free tier)' },
+        ],
+      });
+      if (p.isCancel(provider)) break;
+      const res = await guidedRemoteAdd({ provider });
+      if (res.ok) p.log.success(`✔ ${pc.bold(res.name)} (${res.provider}) added to the pool.`);
+      else if (res.error) p.log.warn(res.error);
+      if (res.cancelled) break;
+      const another = await p.confirm({ message: 'Add another account?', initialValue: true });
+      if (p.isCancel(another) || !another) break;
     }
-    await registerAccountsFlow();
+  } else if (action === 'manual') {
+    p.log.step('Starting rclone config — choose 39 (Mega) or 24 (Google Drive). Then come back.');
+    await execa('rclone', ['config'], { stdio: 'inherit' });
+    await registerRemotesAsAccounts();
+  } else {
+    p.log.message(pc.dim('Carrying on with the accounts you have.'));
   }
+}
 
-  // 3. Schedule overview — snapshot ONLY by default (storage-conscious).
+/** Wizard step: schedule overview. */
+async function scheduleStep() {
   const cfg = loadConfig();
   p.note(
     `   Snapshot backup: ${pc.bold('every Saturday at 22:00')} (keep ${cfg.jobs.snapshots.keep}, local + cloud)\n` +
@@ -136,8 +128,10 @@ export async function runSetup() {
     `   Missed backups : caught up automatically in order when WiFi returns`,
     'Step 3/5 — schedule',
   );
+}
 
-  // 4. Always-on service
+/** Wizard step: install the always-on service. */
+async function serviceStep() {
   const install = await p.confirm({
     message: 'Install the always-on background service (systemd / cron fallback)?',
     initialValue: true,
@@ -148,47 +142,16 @@ export async function runSetup() {
     p.log.success(`Always-on service installed via ${pc.cyan(backend)}.`);
     p.log.message(pc.dim('It survives reboots — a missed Saturday 22:00 run fires as soon as the machine is back online.'));
   }
+}
 
-  // 5. First snapshot now?
+/** Wizard step: first snapshot now? */
+async function firstBackupStep() {
   const first = await p.confirm({
     message: 'Run the FIRST snapshot backup right now? (recommended before a fresh install)',
     initialValue: true,
   });
   if (p.isCancel(first)) { p.cancel('Aborted.'); process.exit(0); }
   if (first) {
-/** Register discovered rclone remotes as accounts (multi-select). */
-async function registerAccountsFlow() {
-  const remotes = await listRemotes();
-  if (remotes.length === 0) {
-    p.log.warn('No rclone remotes found yet. Create one with `rclone config` or re-run setup.');
-    return;
-  }
-  const toAdd = await p.multiselect({
-    message: 'Select which rclone remotes to add to the backup pool (one per account):',
-    options: remotes.map((r) => ({ value: r, label: r })),
-    required: false,
-  });
-  if (p.isCancel(toAdd) || toAdd.length === 0) {
-    p.log.message(pc.dim('No accounts added.'));
-    return;
-  }
-  for (const remote of toAdd) {
-    const provider = await p.select({
-      message: `Provider for "${remote}"?`,
-      options: [
-        { value: 'mega', label: 'MEGA (20 GB free tier)' },
-        { value: 'gdrive', label: 'Google Drive (10 GB free tier)' },
-      ],
-    });
-    if (p.isCancel(provider)) continue;
-    const res = await addAccount({ provider, remote });
-    if (res.ok) p.log.success(`Added ${pc.cyan(remote)} (${provider}).`);
-    else p.log.warn(res.error);
-  }
-  const accounts = await refreshAccounts();
-  p.log.success(poolSummary(accounts).text);
-  journal('setup', `accounts registered: ${accounts.map((a) => a.remote).join(',')}`);
-}
     if (!(await isOnline())) {
       p.log.warn('Offline right now — the backup stays pending and will run automatically when online.');
     } else {
@@ -209,6 +172,35 @@ async function registerAccountsFlow() {
       }
     }
   }
+}
 
-  p.outro(pc.green('Setup complete. Run `parrot-blackbox status` to see everything, or `parrot-blackbox help` for all commands.'));
+export async function runSetup() {
+  p.intro(pc.bgYellow(pc.black(' parrot-blackbox setup ')));
+
+  // 1. Dependencies — check the system and INSTALL anything missing.
+  p.note('Checking & installing the tools needed for snapshot backup + restore…', 'Step 1/5 — tools');
+  const missing = REQUIRED.filter((t) => !hasCommandSync(t.bin));
+  if (missing.length === 0) {
+    p.log.success(`All tools present: ${REQUIRED.map((r) => r.bin).join(', ')}`);
+  } else {
+    const installed = await ensureSystemTools();
+    const stillMissing = REQUIRED.filter((t) => !hasCommandSync(t.bin));
+    if (installed.length) p.log.success(`Installed: ${installed.join(', ')}`);
+    p.log[stillMissing.length ? 'warn' : 'success'](stillMissing.length
+      ? `Still missing: ${stillMissing.map((m) => m.bin).join(', ')}`
+      : `All required tools now present: ${REQUIRED.map((r) => r.bin).join(', ')}`);
+  }
+
+  // 2. Storage pool (guided remote creation or manual registration).
+  await storagePoolStep();
+  const accs = await refreshAccounts();
+  if (accs.length) p.log.success(poolSummary(accs).text);
+
+  // 3–5. Schedule, service, first backup.
+  await scheduleStep();
+  await serviceStep();
+  await firstBackupStep();
+
+  journal('setup', 'wizard completed');
+  p.outro(pc.green('Setup complete. Run `parrot-blackbox status` next, and `parrot-blackbox remote list` to manage accounts.'));
 }

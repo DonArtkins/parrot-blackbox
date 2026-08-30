@@ -3,6 +3,7 @@ import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { createRequire } from 'node:module';
 import { runSetup } from './commands/setup.js';
+import { guidedRemoteAdd, deleteRemote, registerRemotesAsAccounts, remoteStatus } from './commands/remote.js';
 import { runDoctor, runStatus, runUninstallWizard } from './commands/manage.js';
 import { installService, removeService } from './commands/service.js';
 import { runDueJobs } from './daemon/scheduler.js';
@@ -43,10 +44,14 @@ ${pc.bold('Usage:')}
   parrot-blackbox snapshot prune      Delete snapshots beyond the keep limit  ${pc.dim('[sudo]')}
   parrot-blackbox list [files]        List cloud file backups
   parrot-blackbox restore             Restore a snapshot or file backup       ${pc.dim('[sudo]')}
-  parrot-blackbox account add         Add a MEGA / Google Drive account
+  parrot-blackbox account add         Add a MEGA / Google Drive account (remote must already exist)
   parrot-blackbox account list        Show the storage pool & usage
   parrot-blackbox account remove <id> Remove an account from the pool
   parrot-blackbox account quota <id> <GiB>  Override an account quota
+  parrot-blackbox remote add <mega|gdrive> [name]  ⭐ Add a cloud account (sets up rclone FOR you)
+  parrot-blackbox remote list         Show rclone remotes + pool status
+  parrot-blackbox remote remove <name>  Delete a remote AND drop it from the pool
+  parrot-blackbox remote config       Open the full rclone config editor (advanced)
   parrot-blackbox daemon start|stop|status   Background automation
   parrot-blackbox schedule install|remove    systemd / cron always-on setup
   parrot-blackbox doctor              Full diagnostics
@@ -250,6 +255,77 @@ async function accountCommands(rest) {
   }
 }
 
+/** Manage rclone remotes (the cloud logins) + their pool registration. */
+async function remoteCommands(rest) {
+  const [sub, ...args] = rest;
+  switch (sub) {
+    case 'list':
+    case 'ls': {
+      const statuses = await remoteStatus();
+      if (statuses.length === 0) {
+        console.log(pc.yellow('\nNo rclone remotes configured yet. Add one with: parrot-blackbox remote add <mega|gdrive>\n'));
+        return;
+      }
+      console.log(`\n${pc.bold('rclone remotes:')}`);
+      for (const s of statuses) {
+        console.log(`  - ${pc.bold(s.name)}${s.registered ? pc.green('  ✔ registered in pool') : pc.dim(`  not registered (provider: ${s.provider})`)}`);
+      }
+      console.log();
+      return;
+    }
+    case 'add': {
+      const provider = args[0];
+      if (provider && !['mega', 'gdrive'].includes(provider)) {
+        console.log(pc.yellow('provider must be mega or gdrive'));
+        return;
+      }
+      let res;
+      if (!provider) {
+        // Interactive provider pick.
+        const choice = await p.select({
+          message: 'Provider?',
+          options: [
+            { value: 'mega', label: 'MEGA (20 GB free tier)' },
+            { value: 'gdrive', label: 'Google Drive (10 GB free tier)' },
+          ],
+        });
+        if (p.isCancel(choice)) return;
+        res = await guidedRemoteAdd({ provider: choice, name: args[1], userArg: process.env.PBB_MEGA_USER || args[2], passArg: process.env.PBB_MEGA_PASS });
+      } else {
+        res = await guidedRemoteAdd({ provider, name: args[1], userArg: process.env.PBB_MEGA_USER || args[2], passArg: process.env.PBB_MEGA_PASS });
+      }
+      if (res.ok) console.log(pc.green(`✔ Added ${pc.bold(res.name)} (${res.provider}) — connected & registered.`));
+      else if (res.cancelled) console.log(pc.dim('Cancelled — nothing changed.'));
+      else console.log(pc.red(`✖ ${res.error}`));
+      return;
+    }
+    case 'remove':
+    case 'rm': {
+      if (!args[0]) { console.log(pc.yellow('Usage: parrot-blackbox remote remove <remote-name>')); return; }
+      try {
+        await deleteRemote(args[0]);
+        console.log(pc.green(`✔ Removed remote ${args[0]} (rclone config + pool).`));
+      } catch (e) {
+        console.log(pc.red(`✖ ${e.message}`));
+      }
+      return;
+    }
+    case 'config':
+      console.log(pc.dim('Opening rclone config — pick a remote, then e) Edit, d) Delete, r) Rename, c) Copy.'));
+      await import('execa').then(({ execa }) => execa('rclone', ['config'], { stdio: 'inherit' }));
+      return;
+    case 'register': {
+      // Hook so the wizard's multiselect is also reachable standalone.
+      console.log(pc.dim('Registering existing remotes into the pool…'));
+      if (!process.stdin.isTTY) console.log(pc.yellow('No interactive terminal — use `parrot-blackbox account add <provider> <remote>` instead.'));
+      else registerRemotesAsAccounts();
+      return;
+    }
+    default:
+      console.log(pc.yellow('remote subcommands: add <mega|gdrive> [name] | list | remove <name> | config | register'));
+  }
+}
+
 function writeConfigQuiet(cfg) {
   saveConfig(cfg);
 }
@@ -348,6 +424,10 @@ const main = defineCommand({
       case 'account':
       case 'accounts':
         return accountCommands(rest);
+
+      case 'remote':
+      case 'remotes':
+        return remoteCommands(rest);
 
       case 'daemon': {
         const [sub] = rest;

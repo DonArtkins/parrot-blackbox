@@ -15,6 +15,17 @@ import { chooseAccount, walkFiles, MANIFEST_NAME } from '../src/storage/allocato
 import { planPrune, pruneOlderThan } from '../src/backup/retention.js';
 import { parseTimeshiftList } from '../src/backup/snapshot.js';
 
+test('wizard module integrity: runSetup and registration helpers are top-level', async () => {
+  const setupMod = await import('../src/commands/setup.js');
+  const remoteMod = await import('../src/commands/remote.js');
+  assert.equal(typeof setupMod.runSetup, 'function', 'runSetup exported');
+  assert.equal(typeof remoteMod.guidedRemoteAdd, 'function', 'guidedRemoteAdd exported');
+  assert.equal(typeof remoteMod.registerRemotesAsAccounts, 'function', 'registerRemotesAsAccounts exported');
+  assert.equal(typeof remoteMod.deleteRemote, 'function', 'deleteRemote exported');
+  // Guard against the published-v1.0.0 bug: the call must be resolvable at module scope.
+  assert.ok(!/referenceerror.*not defined/i.test(JSON.stringify(setupMod)), 'no ReferenceError baked in');
+});
+
 const at = { hour: 22, minute: 0 };
 
 test('dailyDues lists every 22:00 slot strictly after from, <= to', () => {

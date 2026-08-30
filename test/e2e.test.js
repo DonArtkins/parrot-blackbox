@@ -40,7 +40,57 @@ function latestFilesId(s) {
   return mf.pop().slice('files-'.length, -'.json'.length);
 }
 
-test('accounts: add / list / quota / remove', async () => {
+test('remote add: guided MEGA flow creates the rclone remote AND saves the account', async () => {
+  const s = setupSandbox('remoteadd');
+  populateHome(s);
+
+  // No remotes exist yet.
+  const r0 = await runCli(['remote', 'list'], s.env);
+  assert.equal(r0.exitCode, 0, r0.stdout + r0.stderr);
+  assert.ok(/No rclone remotes configured yet/.test(r0.stdout), r0.stdout);
+
+  // Guided add with args: provider mega, name mega-1. Credentials come via env
+  // (PBB_MEGA_USER / PBB_MEGA_PASS) because the test is non-interactive.
+  const r = await runCli(['remote', 'add', 'mega', 'mega-1'], { ...s.env, PBB_MEGA_USER: 'backup@example.com', PBB_MEGA_PASS: 'hunter2' });
+  assert.equal(r.exitCode, 0, r.stdout + r.stderr);
+  assert.ok(/Added/.test(r.stdout) && /mega-1/.test(r.stdout), r.stdout);
+
+  // The remote is registered in the pool (parrot-blackbox config saved).
+  const cfg = JSON.parse(fs.readFileSync(path.join(s.env.PBB_STATE_DIR, 'config.json'), 'utf8'));
+  const acc = (cfg.storage.accounts || []).find((a) => a.remote === 'mega-1');
+  assert.ok(acc, 'mega-1 should be saved in the parrot-blackbox pool config');
+  assert.equal(acc.provider, 'mega');
+
+  // remote list shows it as registered.
+  const rl = await runCli(['remote', 'list'], s.env);
+  assert.ok(/mega-1/.test(rl.stdout) && /registered/.test(rl.stdout), rl.stdout);
+
+  // remote remove deletes it from rclone AND from the pool.
+  const rr = await runCli(['remote', 'remove', 'mega-1'], s.env);
+  assert.equal(rr.exitCode, 0, rr.stdout + rr.stderr);
+  const remotes = await runCli(['remote', 'list'], s.env);
+  assert.ok(!/mega-1/.test(remotes.stdout), `mega-1 should be gone, got: ${remotes.stdout}`);
+  const cfg2 = JSON.parse(fs.readFileSync(path.join(s.env.PBB_STATE_DIR, 'config.json'), 'utf8'));
+  assert.ok(!(cfg2.storage.accounts || []).some((a) => a.remote === 'mega-1'), 'pool entry removed too');
+});
+
+test('remote add: duplicate registration refuses', async () => {
+  const s = setupSandbox('remotedup');
+  populateHome(s);
+  addRemote(s.env, { remote: 'megaDup', quotaGiB: 20 });
+  await runCli(['account', 'add', 'mega', 'megaDup'], s.env);
+
+  // Registering the same remote again must not silently double-add.
+  const cfg0 = JSON.parse(fs.readFileSync(path.join(s.env.PBB_STATE_DIR, 'config.json'), 'utf8'));
+  const count0 = cfg0.storage.accounts.length;
+  const r = await runCli(['remote', 'add', 'mega', 'megaDup'], { ...s.env, PBB_MEGA_PASS: 'x' });
+  assert.equal(r.exitCode, 0, r.stdout + r.stderr);
+  assert.ok(/✖|already uses remote|Could not add/.test(r.stdout), r.stdout);
+  const cfg1 = JSON.parse(fs.readFileSync(path.join(s.env.PBB_STATE_DIR, 'config.json'), 'utf8'));
+  assert.equal(cfg1.storage.accounts.length, count0, 'no duplicate pool entry');
+});
+
+test('account add/list/quota/remove (pool-only, rclone remote pre-created)', async () => {
   const s = setupSandbox('accounts');
   populateHome(s);
   addRemote(s.env, { remote: 'm1', quotaGiB: 20 });

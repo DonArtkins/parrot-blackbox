@@ -16,13 +16,33 @@ stub_path() {
 
 cmd="$1"; shift
 case "$cmd" in
-  version) echo "rclone v1.68.0 (sandbox stub)"; exit 0 ;;
+  version) echo "rclone v1.75.0 (sandbox stub)"; exit 0 ;;
+  obscure)
+    printf '%s' "$(echo "$1" | base64 -w0)"
+    echo
+    exit 0 ;;
   listremotes)
     for r in "$CLOUD_ROOT"/*/; do
       [ -d "$r" ] || continue
       echo "$(basename "$r"):"
     done
     exit 0 ;;
+  config)
+    action="$1"; shift
+    case "$action" in
+      create)
+        name="$1"; shift
+        mkdir -p "$CLOUD_ROOT/$name"
+        echo "config create: $name $*" >&2
+        exit 0 ;;
+      delete)
+        name="$1"; shift
+        rm -rf "$CLOUD_ROOT/$name" "$CLOUD_ROOT/$name.quota"
+        exit 0 ;;
+      reconnect)
+        exit 0 ;;
+      *) echo "rclone-stub: unknown config action $action" >&2; exit 1 ;;
+    esac ;;
   about)
     remote="${1%:}"; shift
     json=0; for a in "$@"; do [ "$a" = "--json" ] && json=1; done

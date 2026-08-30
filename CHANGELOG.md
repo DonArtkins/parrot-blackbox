@@ -3,6 +3,23 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-08-30
+
+### Fixed
+- **Wizard crash** (`ReferenceError: registerAccountsFlow is not defined`) when
+  adding the first account — the registration helper was accidentally nested
+  inside a scope. The wizard is now split into clear top-level steps.
+- **Account adding actually saves the account.** A new guided flow creates the
+  rclone remote FOR you and registers it in the pool in one step.
+
+### Added
+- **`remote` subcommands** — `remote add <mega|gdrive> [name]` (guided remote
+  creation + pool registration), `remote list`, `remote remove <name>`,
+  `remote config` (advanced rclone editor).
+- **Streamlined setup wizard** — no more raw 68-option `rclone config` menu in
+  the default path; pick MEGA or Drive and type your credentials.
+- **Module-integrity regression test** guarding against the scoping bug.
+
 ## [1.0.0] - 2026-08-29
 
 ### Added
@@ -28,11 +45,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Recovery** — `restore files` for fonts/images/docs and `restore snapshot`
   for a full system restore over a fresh install (interactive sudo, like
   gitswitch/theamify).
-- **Account management** — `account add/list/remove/quota`, plus a gitswitch-style
-  `doctor`, `status`, setup wizard and one-command `uninstall`.
 - **Always-on service** — systemd user unit with cron fallback.
 - **Sandbox e2e suite** — the real CLI is exercised against stub
   rclone/timeshift/sudo binaries and a fake cloud, so the Level-5 destructive
   paths are proven safe before any real use.
 
+[1.0.1]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.1
 [1.0.0]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.0
