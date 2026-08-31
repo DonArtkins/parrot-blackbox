@@ -10,6 +10,11 @@ log() { echo "timeshift $*" >> "$LOG"; }
 cmd="$1"; shift
 case "$cmd" in
   --list)
+    # Reproduce real-world timeshift: listing needs admin access.
+    if [ "${PBB_TIMESHIFT_LIST_REQUIRES_SUDO:-0}" = "1" ] && [ -z "${PBB_UNDER_SUDO:-}" ]; then
+      echo "Application needs admin access." >&2
+      exit 1
+    fi
     log list
     find "$SNAP_DIR" -mindepth 1 -maxdepth 1 -type d | sort | while read -r d; do
       name=$(basename "$d")

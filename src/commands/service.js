@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 import { serviceFile, daemonLogFile } from '../core/paths.js';
 import { loadConfig, journal, hasCommandSync } from '../core/store.js';
@@ -15,6 +16,8 @@ function findCliBin() {
   // npm-installed global binary (preferred) or our own bin entry.
   const candidates = [
     process.env.PBB_BIN,
+    // This module lives in src/commands/ → ../../bin/parrot-blackbox.js
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'parrot-blackbox.js'),
     path.join(path.dirname(process.argv[1] || ''), 'parrot-blackbox.js'),
   ];
   return candidates.find((c) => c && fs.existsSync(c)) || 'parrot-blackbox';

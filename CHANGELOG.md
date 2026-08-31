@@ -3,6 +3,20 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.5] - 2026-08-31
+
+### Fixed
+- **Snapshot creation failed as "timeshift reported success but no snapshot was
+  found"** — `timeshift --list` needs admin access on most installs; the listing
+  now runs through sudo (interactive `sudo timeshift --list`, non-interactive
+  `sudo -n` with a direct fallback) so the created snapshot is properly detected
+  and uploaded. Regression-tested against a stub that refuses unprivileged
+  listings.
+- **Daemon crashed with "Cannot find module '/home/artkins/parrot-blackbox'"**
+  — the systemd user unit's `ExecStart` used a bare command name. The unit now
+  always resolves the real `bin/parrot-blackbox.js` path, and `repair` detects a
+  broken `ExecStart` and re-writes the unit.
+
 ## [1.0.4] - 2026-08-30
 
 ### Fixed
@@ -89,6 +103,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   rclone/timeshift/sudo binaries and a fake cloud, so the Level-5 destructive
   paths are proven safe before any real use.
 
+[1.0.5]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.5
 [1.0.4]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.4
 [1.0.3]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.3
 [1.0.2]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.2

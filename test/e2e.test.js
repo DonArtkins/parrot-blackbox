@@ -348,6 +348,29 @@ test('snapshot now: create → upload → manifest, cloud + local prune', async 
 
   // keep=3 → the two oldest (06-24, 07-01) pruned; 07-08 + 07-15 + new stay.
   const after = fs.readdirSync(tsSnaps);
+test('snapshot now works even when timeshift --list requires admin (real-world bug)', async () => {
+  const s = setupSandbox('snapsudo');
+  populateHome(s);
+  addRemote(s.env, { remote: 'megaSnap', quotaGiB: 20 });
+  await runCli(['account', 'add', 'mega', 'megaSnap'], s.env);
+
+  // Simulate the user's machine: `timeshift --list` refuses without admin,
+  // and we run truly through the sudo path (PBB_SUDO_DIRECT=0 -> sudo stub).
+  const r = await runCli(['snapshot', 'now'], {
+    ...s.env,
+    PBB_SUDO_DIRECT: '0',
+    PBB_TIMESHIFT_LIST_REQUIRES_SUDO: '1',
+  });
+  assert.equal(r.exitCode, 0, r.stdout + r.stderr);
+  assert.ok(!/no snapshot was found|reported success but no snapshot/i.test(r.stdout), r.stdout);
+
+  // The snapshot must exist locally (timeshift stub dir) and in the fake cloud.
+  const tsSnaps = path.join(s.env.PBB_TIMESHIFT_DIR, 'snapshots');
+  const localDirs = fs.readdirSync(tsSnaps).filter((d) => /^2026/.test(d));
+  assert.equal(localDirs.length, 1, `one local snapshot, got ${localDirs.join(',')}`);
+  const cloudAvail = cloudDirs(s.env, 'megaSnap', 'parrot-blackbox/snapshots');
+  assert.ok(cloudAvail.includes(localDirs[0]), `cloud snapshot uploaded; got ${cloudAvail.join(',')}`);
+});
   assert.ok(!after.includes('2026-06-24_10-00-00'), 'oldest snapshot pruned locally');
   assert.ok(!after.includes('2026-07-01_10-00-00'), 'second-old snapshot pruned locally');
   assert.ok(after.includes('2026-07-08_10-00-00'), '07-08 kept');

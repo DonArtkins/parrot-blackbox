@@ -17,7 +17,7 @@ import { refreshAccounts } from '../storage/accounts.js';
 import { planAndPlace } from '../storage/allocator.js';
 import { listArtifacts, removeArtifact } from '../storage/archive.js';
 import { planPrune } from './retention.js';
-import { sudoInteractive, sudoNonInteractive } from '../util/sudo.js';
+import { sudoInteractive, sudoNonInteractive, sudoInteractiveCapture } from '../util/sudo.js';
 
 export class SudoDeferredError extends Error {
   constructor() {
@@ -50,18 +50,33 @@ function findPathInLine(line) {
     null;
 }
 
-/** `timeshift --list` works WITHOUT root — run it directly (no sudo hang risk). */
-async function runTimeshiftList() {
+/**
+ * `timeshift --list` needs admin on most installs — run it with sudo.
+ * Interactive: capture stdout while keeping stdin (so the sudo password
+ * prompt works). Non-interactive: `sudo -n`, falling back to a direct call
+ * for the few builds that allow unprivileged listing.
+ */
+async function runTimeshiftList({ privileged = 'noninteractive' } = {}) {
+  if (privileged === 'interactive') {
+    try {
+      const res = await sudoInteractiveCapture(['timeshift', '--list']);
+      return (res.exitCode === 0 ? res.stdout : res.stdout || res.stderr) || '';
+    } catch {
+      return '';
+    }
+  }
   try {
-    const res = await execa('timeshift', ['--list'], { reject: false });
-    return (res.exitCode === 0 ? res.stdout : res.stdout || res.stderr) || '';
+    const res = await sudoNonInteractive(['timeshift', '--list']);
+    if (res.exitCode === 0) return res.stdout || '';
+    const direct = await execa('timeshift', ['--list'], { reject: false });
+    return (direct.exitCode === 0 ? direct.stdout : direct.stdout || direct.stderr) || '';
   } catch {
     return '';
   }
 }
 
 export async function listLocalSnapshots({ privileged = 'noninteractive' } = {}) {
-  const text = await runTimeshiftList();
+  const text = await runTimeshiftList({ privileged });
   return parseTimeshiftList(text);
 }
 

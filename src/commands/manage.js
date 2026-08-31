@@ -185,14 +185,29 @@ export async function runRepair({ auto = false } = {}) {
   // 3. Service
   try {
     const { serviceFile, daemonLogFile } = await import('../core/paths.js');
-    const { serviceBackend } = await import('./service.js');
+    const { serviceBackend, installService } = await import('./service.js');
     const fsMod = await import('node:fs');
-    if (serviceBackend() === 'systemd' && !fsMod.existsSync(serviceFile())) {
-      const backend = await installService();
-      p.log.success(`Always-on service re-installed via ${backend}.`);
-      fixed.push('service');
+    if (serviceBackend() === 'systemd') {
+      // The ExecStart line must reference a REAL absolute path; the v1.0.4 unit
+      // wrote `node parrot-blackbox daemon foreground` (bare name) which crashed
+      // with "Cannot find module '/home/artkins/parrot-blackbox'".
+      let unitOk = false;
+      try {
+        const unit = fsMod.readFileSync(serviceFile(), 'utf8');
+        const execLine = unit.split('\n').find((l) => l.startsWith('ExecStart=')) || '';
+        unitOk = fsMod.existsSync(serviceFile()) && /ExecStart=\S+/.test(execLine) && /\//.test(execLine);
+      } catch {
+        unitOk = false;
+      }
+      if (!unitOk) {
+        const backend = await installService();
+        p.log.success(`Always-on service re-written via ${backend}.`);
+        fixed.push('service');
+      } else {
+        p.log.success('Service OK.');
+      }
     } else {
-      p.log.success('Service OK.');
+      p.log.success('Service backend OK.');
     }
   } catch (e) {
     p.log.warn(`Service check failed: ${e.message}`);
