@@ -48,16 +48,16 @@ async function autoUpdateCheck() {
 async function addAccountAction() {
   for (;;) {
     const provider = await p.select({
-      message: 'Which provider?',
+      message: '☁️  Add cloud account',
       options: [
-        { value: 'mega', label: 'MEGA (20 GB free tier)' },
-        { value: 'gdrive', label: 'Google Drive (15 GB free tier)' },
+        { value: 'mega', label: 'MEGA', hint: '20 GB free' },
+        { value: 'gdrive', label: 'Google Drive', hint: '15 GB free' },
         { value: 'back', label: '← Back' },
       ],
     });
     if (p.isCancel(provider) || provider === 'back') return;
     const res = await guidedRemoteAdd({ provider });
-    if (res.ok) p.log.success(`✔ ${pc.bold(res.name)} (${res.provider}) added to the pool.`);
+    if (res.ok) p.log.success(`✔ ${pc.bold(res.name)} added to pool.`);
     else if (res.error) p.log.warn(res.error);
     else if (res.cancelled) { p.log.message(pc.dim('Cancelled.')); return; }
     const again = await p.confirm({ message: 'Add another account?', initialValue: false });
@@ -68,12 +68,12 @@ async function addAccountAction() {
 /** Storage pool sub-menu: list / add / remove / quota. */
 async function accountsMenu() {
   const sub = await p.select({
-    message: 'Storage pool — accounts are rclone remotes (MEGA / Google Drive)',
+    message: '🗂 Storage Pool',
     options: [
-      { value: 'list', label: '🔎 List accounts & quotas' },
-      { value: 'add', label: '➕ Add account to the pool (existing rclone remote)' },
-      { value: 'remove', label: '➖ Remove account from the pool' },
-      { value: 'quota', label: '📐 Set an account quota (GiB)' },
+      { value: 'list', label: '📊 Show accounts', hint: 'quotas and usage' },
+      { value: 'add', label: '➕ Add account', hint: 'existing rclone remote' },
+      { value: 'remove', label: '➖ Remove account', hint: 'from pool only' },
+      { value: 'quota', label: '📐 Set quota', hint: 'override account limit' },
       { value: 'back', label: '← Back' },
     ],
   });
@@ -199,13 +199,13 @@ async function listBackupsAction() {
 /** Restore files or a system snapshot. */
 async function restoreMenu() {
   const accs = listAccounts();
-  if (!accs.length) { p.log.warn('No accounts configured — nothing to restore from cloud yet.'); return; }
+  if (!accs.length) { p.log.warn('No cloud accounts configured yet.'); return; }
   const cfg = loadConfig();
   const kind = await p.select({
-    message: 'Restore what?',
+    message: '♻️  Restore backup',
     options: [
-      { value: 'files', label: '📄 File backup (fonts/images/docs into a folder)' },
-      { value: 'snapshot', label: '💽 System snapshot (overwrites the running system)', hint: '[sudo]' },
+      { value: 'files', label: '📄 Files', hint: 'recover documents, images, etc.' },
+      { value: 'snapshot', label: '💽 System snapshot', hint: 'full system restore [sudo]' },
       { value: 'back', label: '← Back' },
     ],
   });
@@ -256,10 +256,10 @@ async function restoreMenu() {
 /** Always-on service sub-menu. */
 async function serviceMenu() {
   const sub = await p.select({
-    message: 'Always-on background service (systemd user unit / cron fallback)',
+    message: '⏱ Schedule Service',
     options: [
-      { value: 'install', label: '✅ Install service' },
-      { value: 'remove', label: '❌ Remove service' },
+      { value: 'install', label: '✅ Enable', hint: 'auto-backup on schedule' },
+      { value: 'remove', label: '❌ Disable', hint: 'stop auto-backup' },
       { value: 'back', label: '← Back' },
     ],
   });
@@ -275,12 +275,13 @@ async function serviceMenu() {
 
 /** Daemon sub-menu. */
 async function daemonMenu() {
+  const running = daemonRunning();
   const sub = await p.select({
-    message: `Daemon is currently ${daemonRunning() ? pc.green('running') : pc.yellow('stopped')}`,
+    message: `🤖 Daemon ${running ? pc.green('●') : pc.yellow('○')} ${running ? 'running' : 'stopped'}`,
     options: [
-      { value: 'start', label: '▶️  Start daemon' },
-      { value: 'stop', label: '⏹  Stop daemon' },
-      { value: 'status', label: '📊 Show status' },
+      { value: 'start', label: '▶️  Start' },
+      { value: 'stop', label: '⏹️  Stop' },
+      { value: 'status', label: '📊 Status' },
       { value: 'back', label: '← Back' },
     ],
   });
@@ -302,7 +303,7 @@ async function daemonMenu() {
  * prompt just returns you to this menu.
  */
 export async function runWizard() {
-  p.intro(pc.bgYellow(pc.black(` 🦜 parrot-blackbox v${pkg.version} `)));
+  p.intro(`🦜 ${pc.bold('parrot-blackbox')} ${pc.dim(`v${pkg.version}`)}`);
 
   if (!process.stdin.isTTY) {
     p.log.warn('No interactive terminal detected — run subcommands directly: `parrot-blackbox help`');
@@ -317,27 +318,27 @@ export async function runWizard() {
     const action = await p.select({
       message: 'What would you like to do?',
       options: [
-        { value: 'add', label: '➕ Add cloud account  (MEGA / Google Drive)', hint: 'sets up rclone for you' },
-        { value: 'accounts', label: '🗂 Storage pool', hint: 'list / add / remove / quota' },
-        { value: 'tools', label: '🛠 Check & install tools', hint: 'rclone, timeshift, git, curl' },
-        { value: 'snapshot', label: '📸 Snapshot now', hint: 'create + upload a weekly snapshot' },
-        { value: 'backup', label: '💾 Run backup now', hint: 'every enabled job (default = snapshot)' },
-        { value: 'list', label: '📋 List backups', hint: 'local + cloud snapshots, file backups' },
-        { value: 'restore', label: '♻️  Restore', hint: 'files or system snapshot' },
-        { value: 'service', label: '⏱ Always-on service', hint: 'install / remove' },
-        { value: 'daemon', label: '🐚 Daemon', hint: 'start / stop / status' },
-        { value: 'setup', label: '🧭 Guided setup', hint: 'walk every setup step' },
-        { value: 'status', label: '📊 Status', hint: 'quick overview' },
+        { value: 'snapshot', label: '📸 Create snapshot', hint: 'backup your system now' },
+        { value: 'backup', label: '💾 Run all backups', hint: 'snapshots + file backups' },
+        { value: 'restore', label: '♻️  Restore backup', hint: 'files or system snapshot' },
+        { value: 'list', label: '📋 List backups', hint: 'see what\'s saved' },
+        { value: 'add', label: '☁️  Add cloud account', hint: 'MEGA or Google Drive' },
+        { value: 'accounts', label: '🗂  Manage storage', hint: 'pool, quotas, accounts' },
+        { value: 'setup', label: '🚀 Guided setup', hint: 'first-time configuration' },
+        { value: 'tools', label: '🔧 Check tools', hint: 'install missing dependencies' },
+        { value: 'service', label: '⏱  Schedule service', hint: 'auto-backup setup' },
+        { value: 'daemon', label: '🤖 Daemon control', hint: 'start / stop / status' },
+        { value: 'status', label: '📊 Status', hint: 'quick health check' },
         { value: 'doctor', label: '🩺 Doctor', hint: 'full diagnostics' },
-        { value: 'repair', label: '🛠  Repair broken install', hint: 'check tools, config, service, pool' },
-        { value: 'update', label: '🔄 Update parrot-blackbox', hint: 'check npm & install latest' },
-        { value: 'uninstall', label: '🗑 Uninstall', hint: 'remove everything (cloud kept)' },
-        { value: 'exit', label: '📴 Exit', hint: 'leave the wizard' },
+        { value: 'repair', label: '🛠️  Repair', hint: 'fix broken installation' },
+        { value: 'update', label: '⬆️  Update', hint: 'check for new version' },
+        { value: 'uninstall', label: '🗑️  Uninstall', hint: 'remove parrot-blackbox' },
+        { value: 'exit', label: '👋 Exit' },
       ],
     });
 
     if (p.isCancel(action) || action === 'exit') {
-      p.outro('Bye! 👋');
+      p.outro('👋 See you later!');
       return;
     }
 
@@ -363,6 +364,6 @@ export async function runWizard() {
     } catch (e) {
       p.log.warn(`✖ ${e.message}`);
     }
-    p.log.message(pc.dim('──────────────────────────────────────────'));
+    p.log.message('');
   }
 }

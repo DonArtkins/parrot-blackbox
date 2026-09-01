@@ -3,6 +3,21 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.7] - 2026-09-01
+
+### Fixed
+- **Snapshot detection completely broken with Timeshift 24.06+** — the output
+  format changed from `Num DATE TIME TAGS NAME` to `Num > NAME TAGS Description`.
+  The parser now supports both the legacy format (for older Timeshift versions)
+  and the current format (24.06+), ensuring snapshots are always detected correctly.
+
+### Changed
+- **Redesigned wizard menu to match gitswitch's friendly UX** — cleaner intro
+  (no yellow background), better emoji choices (☁️ for cloud, 🤖 for daemon),
+  shorter/clearer menu labels, simplified hints, friendlier exit message.
+  Replaced the separator line with a blank line for a cleaner look. All submenus
+  (accounts, restore, service, daemon) now use the same friendly style.
+
 ## [1.0.6] - 2026-09-01
 
 ### Fixed

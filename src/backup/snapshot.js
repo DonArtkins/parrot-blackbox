@@ -26,29 +26,49 @@ export class SudoDeferredError extends Error {
 }
 
 /**
- * Parse `timeshift --list` output into snapshots. Tolerant of the table format
- * used by Timeshift 22.x/23.x/24.x (leading "Num" column + header rows) AND the
- * older plain format:
+ * Parse `timeshift --list` output into snapshots. Tolerant of multiple formats:
  *
- *   Next run: daily at 22:00
+ * Old format (Timeshift 22.x/23.x):
+ *   2026-08-29 22:00:01 W 2026-08-29_22-00-01 /timeshift/snapshots/...
+ *
+ * Table format with header (Timeshift 24.x):
  *   Num     Name                            Tags                Description
- *   0   2026-08-31 16:00:01  W  2026-08-31_16-00-01  parrot-blackbox
+ *   0   2026-08-29 22:00:01  W  2026-08-29_22-00-01  parrot-blackbox
+ *
+ * Current format (Timeshift 24.06+):
+ *   Num     Name                 Tags  Description
+ *   0    >  2026-09-01_21-22-39  W     parrot-blackbox 2026-09-01T21:22:05
  *
  * @returns {Array<{name:string, date:string, time:string, tags:string, dir:?string}>}
  */
 export function parseTimeshiftList(stdout) {
   const out = [];
   for (const line of String(stdout).split('\n')) {
-    // Optional leading Num column; date TIME tags NAME [description…]
-    const m = /^\s*(?:\d+\s+)?(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+([A-Za-z]{1,6})\s+(\S+)(?:\s+(.*))?$/.exec(line);
-    if (!m) continue;
-    const [, date, time, tags, dirOrSize, detail] = m;
-    // Prefer the explicit dir-ish token (name contains _HH-MM-SS) over a rebuilt name.
-    const name = /^[\w.-]+\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(dirOrSize)
-      ? dirOrSize
-      : `${date}_${time.replace(/:/g, '-')}`;
-    const dir = findPathInLine(line);
-    out.push({ name, date, time, tags, dir, line: `${date} ${time} ${tags} ${dirOrSize}${detail ? ` ${detail}` : ''}` });
+    // Try current format first: Num > NAME Tags Description
+    // The NAME field is in YYYY-MM-DD_HH-MM-SS format
+    let m = /^\s*\d+\s+>?\s+(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\s+([A-Za-z]{1,6})\s+(.*)$/.exec(line);
+    if (m) {
+      const [, name, tags, description] = m;
+      // Extract date and time from the name (YYYY-MM-DD_HH-MM-SS)
+      const date = name.slice(0, 10);  // YYYY-MM-DD
+      const time = name.slice(11).replace(/-/g, ':');  // HH:MM:SS
+      const dir = findPathInLine(line);
+      out.push({ name, date, time, tags, dir, line: `${name} ${tags} ${description}` });
+      continue;
+    }
+
+    // Try older format: [Num] DATE TIME TAGS NAME [description]
+    m = /^\s*(?:\d+\s+)?(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+([A-Za-z]{1,6})\s+(\S+)(?:\s+(.*))?$/.exec(line);
+    if (m) {
+      const [, date, time, tags, dirOrName, detail] = m;
+      // Prefer the explicit dir-ish token (name contains _HH-MM-SS) over a rebuilt name.
+      const name = /^[\w.-]+\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(dirOrName)
+        ? dirOrName
+        : `${date}_${time.replace(/:/g, '-')}`;
+      const dir = findPathInLine(line);
+      out.push({ name, date, time, tags, dir, line: `${date} ${time} ${tags} ${dirOrName}${detail ? ` ${detail}` : ''}` });
+      continue;
+    }
   }
   return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
