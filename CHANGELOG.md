@@ -3,6 +3,17 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.8] - 2026-09-01
+
+### Fixed
+- **List backups fails silently** — `listBackupsAction` was using non-interactive
+  sudo which fails silently when the sudo timestamp expires, making it appear like
+  no snapshots exist. Now uses interactive sudo to properly prompt for password.
+- **Snapshot directory not found (BTRFS mode)** — Timeshift BTRFS mode uses
+  dynamic mount paths `/run/timeshift/NNNN/backup/...` where NNNN is a PID. The
+  `snapshotDirFor` function now searches with sudo when needed and handles the
+  dynamic paths correctly, fixing the `ENOENT: no such file or directory` error.
+
 ## [1.0.7] - 2026-09-01
 
 ### Fixed

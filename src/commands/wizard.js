@@ -177,7 +177,7 @@ async function listBackupsAction() {
   const accs = listAccounts();
   p.log.message(pc.bold('Local snapshots (Timeshift):'));
   try {
-    const local = await listLocalSnapshots({ privileged: 'noninteractive' });
+    const local = await listLocalSnapshots({ privileged: 'interactive' });
     if (!local.length) p.log.message(pc.dim('  none'));
     for (const sn of local) p.log.message(`  - ${pc.cyan(sn.name)}`);
   } catch (e) {

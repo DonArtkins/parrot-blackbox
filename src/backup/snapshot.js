@@ -168,7 +168,7 @@ export async function deleteSnapshot(name, { privileged = 'noninteractive' } = {
 /**
  * Resolve the on-disk directory of a snapshot.
  * BTRFS mode keeps snapshots in a hidden subvolume that Timeshift mounts at
- * /run/timeshift/backup (e.g. .../timeshift-btrfs/snapshots/<name>) — check the
+ * /run/timeshift/NNNN/backup (e.g. .../timeshift-btrfs/snapshots/<name>) — check the
  * classic locations first, then search the mounted backup tree.
  */
 export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {}) {
@@ -185,13 +185,25 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
   if (direct) return direct;
 
   // Best effort: search the mounted Timeshift backup tree for the snapshot dir.
+  // BTRFS mode uses dynamic PIDs in the mount path: /run/timeshift/NNNN/backup/...
   try {
-    if (fs.existsSync('/run/timeshift/backup')) {
-      const found = execaSync(
+    if (fs.existsSync('/run/timeshift')) {
+      // Try without sudo first (faster)
+      let found = execaSync(
         'bash',
-        ['-c', `find /run/timeshift/backup -maxdepth 5 -type d -name '${snapshot.name}' 2>/dev/null | head -1`],
+        ['-c', `find /run/timeshift -maxdepth 5 -type d -name '${snapshot.name}' 2>/dev/null | head -1`],
         { reject: false, timeout: 5000 },
       ).stdout.trim();
+      
+      // If that fails and we can use sudo, try with elevated privileges
+      if (!found && privileged === 'interactive') {
+        found = execaSync(
+          'sudo',
+          ['bash', '-c', `find /run/timeshift -maxdepth 5 -type d -name '${snapshot.name}' 2>/dev/null | head -1`],
+          { reject: false, timeout: 5000 },
+        ).stdout.trim();
+      }
+      
       if (found) return found;
     }
   } catch {
