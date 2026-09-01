@@ -3,6 +3,11 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.11] - 2026-09-02
+
+### Fixed
+- **BTRFS snapshot upload EACCES permissions error** — `fs.readdirSync` failed when scanning root-owned files (like `/etc/credstore`) inside the Timeshift BTRFS mount. The upload logic is now run through an internal privileged helper (`sudo -E node ... _internal_upload`), allowing full traversal and chunking of BTRFS files while preserving the exact interactive sudo password prompt behavior used in other tools (e.g. gitswitch).
+
 ## [1.0.10] - 2026-09-02
 
 ### Fixed
@@ -175,6 +180,11 @@ adheres to [Semantic Versioning](https://semver.org/).
   rclone/timeshift/sudo binaries and a fake cloud, so the Level-5 destructive
   paths are proven safe before any real use.
 
+[1.0.11]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.11
+[1.0.10]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.10
+[1.0.9]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.9
+[1.0.8]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.8
+[1.0.7]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.7
 [1.0.6]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.6
 [1.0.5]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.5
 [1.0.4]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.4
