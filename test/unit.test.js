@@ -13,7 +13,7 @@ import path from 'node:path';
 import { dailyDues, weeklyDues, advancePending, dueDay } from '../src/core/time.js';
 import { chooseAccount, walkFiles, MANIFEST_NAME } from '../src/storage/allocator.js';
 import { planPrune, pruneOlderThan } from '../src/backup/retention.js';
-import { parseTimeshiftList } from '../src/backup/snapshot.js';
+import { parseTimeshiftList, extractCreatedName } from '../src/backup/snapshot.js';
 
 test('wizard module integrity: runSetup and registration helpers are top-level', async () => {
   const setupMod = await import('../src/commands/setup.js');
@@ -152,15 +152,44 @@ test('pruneOlderThan drops artifacts older than the age limit', () => {
 });
 
 test('parseTimeshiftList parses real timeshift --list output', () => {
-  const out = [
+  // Old-style plain rows (no header / no Num column).
+  const oldOut = [
     '2026-08-29 22:00:01 W 2026-08-29_22-00-01 /timeshift/snapshots/2026-08-29_22-00-01',
     '2026-07-15 09:15:00 O 2026-07-15_09-15-00 /timeshift/snapshots/2026-07-15_09-15-00',
     'junk line that must be ignored',
   ].join('\n');
-  const snaps = parseTimeshiftList(out);
+  const snaps = parseTimeshiftList(oldOut);
   assert.equal(snaps.length, 2);
   assert.equal(snaps[0].name, '2026-07-15_09-15-00');
   assert.equal(snaps[1].name, '2026-08-29_22-00-01');
   assert.equal(snaps[1].tags, 'W');
   assert.ok(snaps[1].dir.endsWith('2026-08-29_22-00-01'));
+});
+
+test('parseTimeshiftList parses Timeshift 24.x table format (header + Num column)', () => {
+  const out = [
+    'Next run: disabled',
+    'Num     Name                            Tags                Description',
+    '0   2026-08-29 22:00:01  W  2026-08-29_22-00-01  parrot-blackbox',
+    '1   2026-07-15 09:15:00  O  2026-07-15_09-15-00  parrot-blackbox',
+  ].join('\n');
+  const snaps = parseTimeshiftList(out);
+  assert.equal(snaps.length, 2);
+  assert.equal(snaps[0].name, '2026-07-15_09-15-00', 'sorted oldest first');
+  assert.equal(snaps[1].name, '2026-08-29_22-00-01');
+  assert.equal(snaps[1].date, '2026-08-29');
+  assert.equal(snaps[1].tags, 'W');
+});
+
+test('extractCreatedName reads the snapshot name from timeshift --create output', () => {
+  assert.equal(
+    extractCreatedName('Created new snapshot: 2026-08-31_16-00-01'),
+    '2026-08-31_16-00-01',
+  );
+  assert.equal(
+    extractCreatedName('\nCreated new snapshot: 2026-08-31_16-00-01\nsome log'),
+    '2026-08-31_16-00-01',
+  );
+  assert.equal(extractCreatedName('nothing here'), null);
+  assert.equal(extractCreatedName(''), null);
 });

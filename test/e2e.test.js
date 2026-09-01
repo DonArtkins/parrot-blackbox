@@ -378,6 +378,37 @@ test('snapshot now works even when timeshift --list requires admin (real-world b
   assert.ok(cloudAvail.filter((d) => d.startsWith('2026-')).length <= 3, 'cloud snapshot count bounded by keep');
   assert.ok(!cloudAvail.includes('2026-06-24_10-00-00'), 'cloud prune in the same pass');
 });
+test('network probe is online when ANY reachable host answers (multi-host failover)', async () => {
+  const s = setupSandbox('netmulti');
+  populateHome(s);
+  const { defaultConfig } = await import('../src/core/store.js');
+  fs.writeFileSync(path.join(s.state, 'config.json'), JSON.stringify(defaultConfig()));
+  // Stub curl: answers only for api.github.com (mega = DNS fail, like your box).
+  const stubDir = path.join(s.root, 'curlstub');
+  fs.mkdirSync(stubDir, { recursive: true });
+  fs.writeFileSync(path.join(stubDir, 'curl'), '#!/usr/bin/env bash\ncase "$*" in *api.github.com*) exit 0 ;; *) exit 6 ;; esac\n');
+  fs.chmodSync(path.join(stubDir, 'curl'), 0o755);
+
+  const { isOnline } = await import('../src/util/network.js');
+  const env = {
+    ...s.env,
+    HOME: s.home,
+    PATH: `${stubDir}:${s.env.PATH}`,
+    PBB_CONFIG_FILE: path.join(s.state, 'config.json'),
+    PBB_STATE_DIR: s.state,
+    PBB_NETWORK: '',
+  };
+  const cfg = JSON.parse(fs.readFileSync(path.join(s.state, 'config.json'), 'utf8'));
+  cfg.network.pingHost = 'https://api.mega.nz'; // unreachable in stub
+  cfg.network.pingHosts = ['https://api.github.com']; // reachable
+  fs.writeFileSync(path.join(s.state, 'config.json'), JSON.stringify(cfg));
+
+  const prevEnv = { ...process.env };
+  Object.entries(env).forEach(([k, v]) => { process.env[k] = v; });
+  const up = await isOnline();
+  Object.entries(prevEnv).forEach(([k, v]) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  assert.equal(up, true, 'multi-host failover should report online via github even when mega fails');
+});
 
 test('daemon: snapshot jobs defer when sudo timestamp lapsed (never hang)', async () => {
   const s = setupSandbox('sudodefer');

@@ -9,7 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execa } from 'execa';
+import { execa, execaSync } from 'execa';
 import { loadConfig, loadState, saveState, journal, hasCommandSync } from '../core/store.js';
 import { timeshiftDir } from '../core/paths.js';
 import { iso, clock } from '../core/time.js';
@@ -26,20 +26,37 @@ export class SudoDeferredError extends Error {
 }
 
 /**
- * Parse `timeshift --list` output into snapshots.
+ * Parse `timeshift --list` output into snapshots. Tolerant of the table format
+ * used by Timeshift 22.x/23.x/24.x (leading "Num" column + header rows) AND the
+ * older plain format:
+ *
+ *   Next run: daily at 22:00
+ *   Num     Name                            Tags                Description
+ *   0   2026-08-31 16:00:01  W  2026-08-31_16-00-01  parrot-blackbox
+ *
  * @returns {Array<{name:string, date:string, time:string, tags:string, dir:?string}>}
  */
 export function parseTimeshiftList(stdout) {
   const out = [];
   for (const line of String(stdout).split('\n')) {
-    const m = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+([A-Z])\s+(\S+)(?:\s+(.*))?$/.exec(line);
+    // Optional leading Num column; date TIME tags NAME [description…]
+    const m = /^\s*(?:\d+\s+)?(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+([A-Za-z]{1,6})\s+(\S+)(?:\s+(.*))?$/.exec(line);
     if (!m) continue;
     const [, date, time, tags, dirOrSize, detail] = m;
-    const name = `${date}_${time.replace(/:/g, '-')}`;
+    // Prefer the explicit dir-ish token (name contains _HH-MM-SS) over a rebuilt name.
+    const name = /^[\w.-]+\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(dirOrSize)
+      ? dirOrSize
+      : `${date}_${time.replace(/:/g, '-')}`;
     const dir = findPathInLine(line);
     out.push({ name, date, time, tags, dir, line: `${date} ${time} ${tags} ${dirOrSize}${detail ? ` ${detail}` : ''}` });
   }
   return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** Extract a created snapshot name from `timeshift --create` output. */
+export function extractCreatedName(output) {
+  const m = /Created new snapshot[:\s]+([\w.\-]+)/i.exec(String(output || ''));
+  return m ? m[1] : null;
 }
 
 /** Extract the snapshot directory path from a list line if present. */
@@ -85,18 +102,28 @@ export async function createSnapshot({ comment, privileged = 'noninteractive' } 
   const before = new Set((await listLocalSnapshots({ privileged })).map((s) => s.name));
   const args = ['timeshift', '--create', '--comments', comment || 'parrot-blackbox', '--tags', 'W'];
 
+  let createOut = '';
   if (privileged === 'interactive') {
-    const res = await sudoInteractive(args);
+    const res = await sudoInteractiveCapture(args);
     if (res.exitCode !== 0) throw new Error(`timeshift --create failed (exit ${res.exitCode})`);
+    createOut = `${res.stdout || ''} ${res.stderr || ''}`;
   } else {
     const res = await sudoNonInteractive(args);
     if (res.exitCode !== 0) {
       if (/password|authentication|sudo/i.test(res.stderr || '')) throw new SudoDeferredError();
       throw new Error(`timeshift --create failed (exit ${res.exitCode}): ${res.stderr?.trim()}`);
     }
+    createOut = `${res.stdout || ''} ${res.stderr || ''}`;
   }
 
-  // Find which snapshot appeared.
+  // Primary: read the exact name from timeshift's own output
+  // ("Created new snapshot: 2026-08-31_16-00-01") — the most reliable signal.
+  const createdName = extractCreatedName(createOut);
+  if (createdName) {
+    return { name: createdName, date: createdName.slice(0, 10), time: createdName.slice(11).replace(/-/g, ':'), tags: 'W', dir: null, line: createOut.trim() };
+  }
+
+  // Fallback: diff the list before/after.
   const after = await listLocalSnapshots({ privileged });
   const created = after.find((s) => !before.has(s.name)) || after[after.length - 1];
   if (!created) throw new Error('timeshift reported success but no snapshot was found');
@@ -118,15 +145,39 @@ export async function deleteSnapshot(name, { privileged = 'noninteractive' } = {
   }
   return true;
 }
-/** Resolve the on-disk directory of a snapshot. */
+/**
+ * Resolve the on-disk directory of a snapshot.
+ * BTRFS mode keeps snapshots in a hidden subvolume that Timeshift mounts at
+ * /run/timeshift/backup (e.g. .../timeshift-btrfs/snapshots/<name>) — check the
+ * classic locations first, then search the mounted backup tree.
+ */
 export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {}) {
   if (snapshot.dir && fs.existsSync(snapshot.dir)) return snapshot.dir;
   const base = timeshiftDir();
   const candidates = [
     path.join(base, 'snapshots', snapshot.name),
     path.join(base, snapshot.name),
+    `/run/timeshift/backup/${snapshot.name}`,
+    `/run/timeshift/backup/timeshift-btrfs/snapshots/${snapshot.name}`,
+    `/run/timeshift/backup/@/timeshift-btrfs/snapshots/${snapshot.name}`,
   ];
-  return candidates.find((c) => fs.existsSync(c)) || candidates[0];
+  const direct = candidates.find((c) => fs.existsSync(c));
+  if (direct) return direct;
+
+  // Best effort: search the mounted Timeshift backup tree for the snapshot dir.
+  try {
+    if (fs.existsSync('/run/timeshift/backup')) {
+      const found = execaSync(
+        'bash',
+        ['-c', `find /run/timeshift/backup -maxdepth 5 -type d -name '${snapshot.name}' 2>/dev/null | head -1`],
+        { reject: false, timeout: 5000 },
+      ).stdout.trim();
+      if (found) return found;
+    }
+  } catch {
+    /* fall through */
+  }
+  return candidates[0];
 }
 
 /**

@@ -1,6 +1,6 @@
 {
   "name": "parrot-blackbox",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "parrot-blackbox — crash-proof, multi-cloud backup & recovery automation for Parrot OS. Daily/weekly off-disk backups with automatic catch-up, smart storage across many MEGA + Google Drive accounts, Timeshift snapshot backups and one-command restore.",
   "type": "module",
   "main": "src/cli.js",

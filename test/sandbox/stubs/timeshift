@@ -16,12 +16,16 @@ case "$cmd" in
       exit 1
     fi
     log list
+    echo "Next run: disabled"
+    echo "Num     Name                            Tags                Description"
+    n=0
     find "$SNAP_DIR" -mindepth 1 -maxdepth 1 -type d | sort | while read -r d; do
       name=$(basename "$d")
       date=${name%_*}
       datets=${name#*_}
       time=${datets//-/:}
-      echo "$date $time W $name $d"
+      echo "$n   $date $time W  $name  parrot-blackbox"
+      n=$(( n + 1 ))
     done
     exit 0 ;;
   --create)

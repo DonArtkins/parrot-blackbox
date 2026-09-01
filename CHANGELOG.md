@@ -3,6 +3,27 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.6] - 2026-09-01
+
+### Fixed
+- **"timeshift reported success but no snapshot was found"** — the root cause
+  was `timeshift --list`'s 24.x table format (leading `Num` column + header)
+  that the parser didn't recognize. The snapshot name now comes straight from
+  `timeshift --create` output ("Created new snapshot: …"), with a tolerant
+  parser (old + table formats) as fallback.
+- **Snapshot directory resolution for BTRFS mode** — snapshots live under the
+  mounted hidden subvolume (`/run/timeshift/backup/…`), not `/timeshift`. The
+  resolver now searches `/run/timeshift/backup` too, so the upload actually
+  finds the snapshot content.
+- **Daemon stuck on "offline" forever** — the connectivity probe used
+  `curl -fS` and a single host (`api.mega.nz`, which your network fails to
+  resolve; `api.github.com` also returns 403 to HEAD). The probe now accepts
+  ANY HTTP response (any response = internet) across multiple hosts, with a
+  bare-TCP last resort. This was silently deferring every scheduled backup.
+- **systemd user unit wrote a bare `ExecStart` name** — the daemon crashed with
+  "Cannot find module". The unit now uses the absolute bin path; `repair`
+  detects and re-writes a broken unit.
+
 ## [1.0.5] - 2026-08-31
 
 ### Fixed
@@ -103,6 +124,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   rclone/timeshift/sudo binaries and a fake cloud, so the Level-5 destructive
   paths are proven safe before any real use.
 
+[1.0.6]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.6
 [1.0.5]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.5
 [1.0.4]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.4
 [1.0.3]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.3
