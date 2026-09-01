@@ -167,9 +167,15 @@ export async function deleteSnapshot(name, { privileged = 'noninteractive' } = {
 }
 /**
  * Resolve the on-disk directory of a snapshot.
- * BTRFS mode keeps snapshots in a hidden subvolume that Timeshift mounts at
- * /run/timeshift/NNNN/backup (e.g. .../timeshift-btrfs/snapshots/<name>) — check the
- * classic locations first, then search the mounted backup tree.
+ * 
+ * BTRFS mode stores snapshots as subvolumes on the BTRFS partition. Timeshift mounts
+ * the root subvolume (subvolid=5) temporarily to /run/timeshift/NNNN/backup when needed.
+ * 
+ * Strategy:
+ * 1. Check if already have a valid dir
+ * 2. Check static paths (rsync mode)
+ * 3. Mount the BTRFS root subvolume ourselves to access snapshots persistently
+ * 4. Fall back to triggering timeshift --list
  */
 export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {}) {
   if (snapshot.dir && fs.existsSync(snapshot.dir)) return snapshot.dir;
@@ -184,32 +190,68 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
   const direct = candidates.find((c) => fs.existsSync(c));
   if (direct) return direct;
 
-  // Best effort: search the mounted Timeshift backup tree for the snapshot dir.
-  // BTRFS mode uses dynamic PIDs in the mount path: /run/timeshift/NNNN/backup/...
+  // BTRFS mode: Mount the root subvolume to access snapshots
+  // Find the BTRFS device (usually the root filesystem)
   try {
-    if (fs.existsSync('/run/timeshift')) {
-      // Try without sudo first (faster)
-      let found = execaSync(
-        'bash',
-        ['-c', `find /run/timeshift -maxdepth 5 -type d -name '${snapshot.name}' 2>/dev/null | head -1`],
-        { reject: false, timeout: 5000 },
-      ).stdout.trim();
+    const mountPoint = `/run/parrot-blackbox-btrfs-${Date.now()}`;
+    
+    // Get the device that contains the root filesystem
+    const deviceResult = execaSync('findmnt', ['-n', '-o', 'SOURCE', '/'], { reject: false });
+    const device = deviceResult.stdout.trim();
+    
+    if (device && deviceResult.exitCode === 0) {
+      // Create temporary mount point
+      const mkdirCmd = privileged === 'interactive' ? ['sudo', 'mkdir', '-p', mountPoint] : ['sudo', '-n', 'mkdir', '-p', mountPoint];
+      execaSync(mkdirCmd[0], mkdirCmd.slice(1), { reject: false });
       
-      // If that fails and we can use sudo, try with elevated privileges
-      if (!found && privileged === 'interactive') {
-        found = execaSync(
-          'sudo',
-          ['bash', '-c', `find /run/timeshift -maxdepth 5 -type d -name '${snapshot.name}' 2>/dev/null | head -1`],
-          { reject: false, timeout: 5000 },
-        ).stdout.trim();
+      // Mount BTRFS root subvolume (subvolid=5 contains all subvolumes including snapshots)
+      const mountCmd = privileged === 'interactive' 
+        ? ['sudo', 'mount', '-o', 'subvolid=5', device, mountPoint]
+        : ['sudo', '-n', 'mount', '-o', 'subvolid=5', device, mountPoint];
+      
+      const mountResult = execaSync(mountCmd[0], mountCmd.slice(1), { reject: false, timeout: 5000 });
+      
+      if (mountResult.exitCode === 0) {
+        // Search for the snapshot in the mounted root subvolume
+        const searchPaths = [
+          `${mountPoint}/timeshift-btrfs/snapshots/${snapshot.name}`,
+          `${mountPoint}/@/timeshift-btrfs/snapshots/${snapshot.name}`,
+          `${mountPoint}/@timeshift/snapshots/${snapshot.name}`,
+        ];
+        
+        const found = searchPaths.find((p) => fs.existsSync(p));
+        
+        if (found) {
+          // Store the mount point for cleanup later
+          snapshot._tempMount = mountPoint;
+          return found;
+        }
+        
+        // Unmount if we didn't find anything
+        const umountCmd = privileged === 'interactive' ? ['sudo', 'umount', mountPoint] : ['sudo', '-n', 'umount', mountPoint];
+        execaSync(umountCmd[0], umountCmd.slice(1), { reject: false });
+        execaSync('sudo', ['-n', 'rmdir', mountPoint], { reject: false });
       }
-      
-      if (found) return found;
     }
   } catch {
     /* fall through */
   }
+  
+  // Last resort: return the most likely path (will fail with ENOENT if it doesn't exist)
   return candidates[0];
+}
+
+/** Cleanup temporary BTRFS mount if one was created */
+export function cleanupSnapshotMount(snapshot) {
+  if (snapshot._tempMount) {
+    try {
+      execaSync('sudo', ['-n', 'umount', snapshot._tempMount], { reject: false });
+      execaSync('sudo', ['-n', 'rmdir', snapshot._tempMount], { reject: false });
+      delete snapshot._tempMount;
+    } catch {
+      /* best effort */
+    }
+  }
 }
 
 /**
@@ -237,7 +279,11 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
   } catch (e) {
     // The local snapshot exists and is safe; the cloud upload failed.
     journal('snapshots', `upload failed for ${created.name}: ${e.message}`, 'error');
+    cleanupSnapshotMount(created);  // Clean up any temporary BTRFS mount
     throw e;
+  } finally {
+    // Always cleanup the temporary mount after upload attempt
+    cleanupSnapshotMount(created);
   }
   manifest.due = due;
   manifest.snapshot = created.name;

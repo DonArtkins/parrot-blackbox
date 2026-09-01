@@ -3,6 +3,26 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.9] - 2026-09-02
+
+### Fixed
+- **CRITICAL: BTRFS snapshot upload always fails with ENOENT** — The root cause was
+  that Timeshift unmounts the BTRFS subvolume immediately after creating a snapshot.
+  When `snapshotDirFor()` tried to access `/timeshift/snapshots/...` or even searched
+  `/run/timeshift`, the mount was already gone, causing `ENOENT: no such file or directory`.
+  
+  **Solution:** Mount the BTRFS root subvolume (subvolid=5) ourselves at a temporary
+  location to access all snapshots directly. The mount is kept active during upload,
+  then cleaned up automatically. This works because BTRFS snapshots are stored as
+  subvolumes on the same partition, accessible by mounting the root subvolume which
+  contains `timeshift-btrfs/snapshots/`.
+  
+  **Technical details:** Timeshift BTRFS mode stores snapshots at
+  `<root-subvol>/timeshift-btrfs/snapshots/<NAME>`. These are accessible by mounting
+  the device with `subvolid=5` (the BTRFS root subvolume). The fix creates a temporary
+  mount at `/run/parrot-blackbox-btrfs-<timestamp>`, accesses the snapshot, uploads it,
+  then unmounts and removes the temporary directory.
+
 ## [1.0.8] - 2026-09-01
 
 ### Fixed
