@@ -449,6 +449,7 @@ Every account is exactly one rclone remote (`mega-1:`, `gdrive-6:` …).
   percentage** (water-filling), then most free.
 - A file that doesn't fit any single account is split at `chunkSize` boundaries
   and the pieces are spread across accounts — restore reassembles byte-perfect.
+- **BTRFS native support** — BTRFS root-owned snapshot files (e.g. `/etc/credstore`) are securely backed up to the cloud without `EACCES` permission errors via an internal privileged helper that integrates with the familiar interactive sudo prompt.
 - The manifest is written to the cloud **and** mirrored locally, so a wiped
   machine can still find and restore everything.
 
