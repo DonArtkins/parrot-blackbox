@@ -107,6 +107,25 @@ and pending backups.
 
 ---
 
+## 🤖 Background Automation (Set it and forget it)
+
+To make `parrot-blackbox` take weekly snapshots and upload them to your cloud accounts completely automatically in the background, install the background service:
+
+```bash
+parrot-blackbox schedule install
+parrot-blackbox daemon start
+```
+
+Once started, the daemon runs silently as a background process. It wakes up every Saturday at 22:00, takes a Timeshift snapshot, and trickles the upload to your cloud accounts. 
+If your laptop happens to be powered off or completely offline on Saturday night, the daemon is smart enough to immediately catch up and run the missed backup the very next time you connect to WiFi!
+
+You can check on the daemon at any time using:
+```bash
+parrot-blackbox status
+```
+
+---
+
 ## Managing cloud accounts (rclone remotes)
 
 Every MEGA / Google Drive login becomes one rclone remote = one pool account.
@@ -496,18 +515,27 @@ parrot-blackbox restore files <backup-id> ~/recovered
 ```bash
 # on the fresh Parrot:
 npm install -g parrot-blackbox
-rclone config                       # re-add the same remotes
+rclone config                             # re-add the same remotes
 parrot-blackbox account add mega mega-1   # …add every account
-parrot-blackbox snapshot list       # see what's in the cloud
+parrot-blackbox snapshot list             # see what's in the cloud
 parrot-blackbox restore snapshot <snapshot-id> --yes
 ```
 
-This downloads the snapshot into Timeshift, then runs the interactive restore
-(expect a `sudo` password prompt) — it **overwrites the fresh install's system
-root** with the snapshot. After a reboot you're back to your old system; then
-`sudo apt update && sudo apt upgrade` to move onto a newer Parrot release if
-you installed one. Encryption or not makes no difference — snapshot restore is
-run from inside the OS.
+#### What happens during a snapshot restore on a fresh install?
+When you run the restore command, `parrot-blackbox` does the following:
+1. **Downloads the snapshot:** It pulls the exact system snapshot from your cloud accounts, reassembles the byte-chunks, and places it into your local Timeshift directory.
+2. **Runs Timeshift Restore:** It then hands over control to Timeshift (`sudo timeshift --restore`).
+3. **Overwrites the OS:** Timeshift systematically replaces the system files of your *fresh* install with the files from your *snapshot*. Your programs, configurations, user settings, and installed packages are exactly reverted to how they were when the snapshot was taken.
+4. **Bootloader update:** Finally, Timeshift updates your GRUB bootloader and `/etc/fstab` to match the UUIDs of your new disk partitions, ensuring the system can boot.
+
+#### What about Disk Encryption (Passphrases)?
+**Disk encryption (LUKS) operates at the hardware/disk level, while snapshots operate at the file level.** 
+If your old system had a passphrase (encrypted), but you decide to fresh-install Parrot OS *without* a passphrase (unencrypted), **the restore will still work perfectly.**
+- The snapshot only contains your files and programs, not the LUKS encryption container.
+- When Timeshift restores the files onto your new unencrypted fresh install, it simply places the files into the unencrypted disk.
+- Timeshift automatically detects the new partition layout, updates your boot configurations, and after a reboot, you will have your exact old system back, but running on an unencrypted drive without any password prompts on boot!
+
+*Note: After rebooting into your restored system, it is always a good idea to run `sudo apt update && sudo apt upgrade` to ensure all packages are perfectly aligned with the latest Parrot OS repositories.*
 
 ---
 
