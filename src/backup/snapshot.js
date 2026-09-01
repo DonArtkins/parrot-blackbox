@@ -197,7 +197,7 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
     
     // Get the device that contains the root filesystem
     const deviceResult = execaSync('findmnt', ['-n', '-o', 'SOURCE', '/'], { reject: false });
-    const device = deviceResult.stdout.trim();
+    const device = deviceResult.stdout.trim().split('[')[0];
     
     if (device && deviceResult.exitCode === 0) {
       // Create temporary mount point
