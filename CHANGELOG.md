@@ -3,6 +3,11 @@
 All notable changes to **parrot-blackbox** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.10] - 2026-09-02
+
+### Fixed
+- **BTRFS device parsing fix** — `findmnt` returns the block device with the subvolume path in brackets (e.g. `/dev/dm-0[/@]`). This broke the BTRFS root subvolume mounting. The block device string is now properly parsed so the mount succeeds.
+
 ## [1.0.9] - 2026-09-02
 
 ### Fixed
