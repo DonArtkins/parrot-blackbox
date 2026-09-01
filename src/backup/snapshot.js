@@ -268,14 +268,25 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
 
   let manifest;
   try {
-    manifest = await planAndPlace(dir, {
-      kind: 'snapshots',
-      id: created.name,
-      accounts,
-      remoteRoot: cfg.storage.remoteRoot,
-      chunkSize: cfg.storage.chunkSize,
-      onProgress,
-    });
+    const bin = process.argv[1] || 'parrot-blackbox';
+    const outPath = path.join(process.env.PBB_STATE_DIR || '/tmp', `manifest-${created.name}.json`);
+    const baseArgs = [process.execPath, bin, '_internal_upload', dir, 'snapshots', created.name, cfg.storage.remoteRoot, String(cfg.storage.chunkSize), outPath];
+    const args = process.env.PBB_SUDO_DIRECT === '1' ? baseArgs : ['-E', ...baseArgs];
+    
+    let res;
+    if (privileged === 'interactive') {
+      res = await sudoInteractive(args);
+    } else {
+      res = await sudoNonInteractive(args);
+    }
+    
+    if (res.exitCode !== 0) {
+      throw new Error(`upload failed (exit ${res.exitCode})`);
+    }
+    
+    const manifestStr = fs.readFileSync(outPath, 'utf8');
+    manifest = JSON.parse(manifestStr);
+    try { fs.rmSync(outPath, {force: true}); } catch {}
   } catch (e) {
     // The local snapshot exists and is safe; the cloud upload failed.
     journal('snapshots', `upload failed for ${created.name}: ${e.message}`, 'error');

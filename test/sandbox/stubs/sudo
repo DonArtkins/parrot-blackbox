@@ -7,6 +7,7 @@ if [ "${PBB_SUDO_REFUSE:-0}" = "1" ]; then
   exit 1
 fi
 if [ "$1" = "-n" ]; then shift; fi
+if [ "${1:-}" = "-E" ]; then shift; fi
 if [ $# -eq 0 ]; then exit 0; fi
 cmd="$1"; shift
 export PBB_UNDER_SUDO=1

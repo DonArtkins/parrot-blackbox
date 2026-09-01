@@ -512,6 +512,36 @@ const main = defineCommand({
         console.log(`parrot-blackbox v${pkg.version}`);
         return;
 
+      case '_internal_upload': {
+        const localDir = rest[0];
+        const kind = rest[1];
+        const id = rest[2];
+        const remoteRoot = rest[3];
+        const chunkSize = parseInt(rest[4], 10);
+        const outPath = rest[5];
+        const { planAndPlace } = await import('./storage/allocator.js');
+        const s = p.spinner();
+        s.start(`Uploading snapshot ${id}...`);
+        const cfg = loadConfig();
+        const accs = await refreshAccounts(cfg);
+        try {
+          const manifest = await planAndPlace(localDir, { 
+            kind, id, accounts: accs, remoteRoot, chunkSize,
+            onProgress: (prog) => {
+              s.message(prog.text);
+            }
+          });
+          s.stop('✔ Upload complete');
+          import('node:fs').then(fs => fs.writeFileSync(outPath, JSON.stringify(manifest)));
+          process.exitCode = 0;
+        } catch (e) {
+          s.stop('✖ Upload failed');
+          console.error(`_internal_upload failed: ${e.message}`);
+          process.exitCode = 1;
+        }
+        return;
+      }
+
       case 'help':
       case '-h':
       case '--help':
@@ -522,6 +552,4 @@ const main = defineCommand({
         process.exitCode = 1;
     }
   },
-});
-
-runMain(main);
+});runMain(main);
