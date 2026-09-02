@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.16] - 2026-09-02
+
+### Changed
+- **Interactive Sudo Prompts Everywhere** — Replaced silent non-interactive sudo execution with an intelligent authentication wrapper. Now, any menu item, command, package installation, or update requiring root privileges will explicitly pause and prompt for your sudo password interactively (`sudo -v`), arming the session so you never have to guess when root access is needed.
+
 ## [1.0.15] - 2026-09-02
 
 ### Fixed
