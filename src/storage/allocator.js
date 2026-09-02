@@ -3,13 +3,16 @@
  * (many MEGA + Google Drive logins) from ever running out of space.
  *
  * Strategy:
- *   1. Every file of an artifact is placed WHOLE on a single account when it
- *      fits. The account is chosen to minimise the resulting used-percentage
- *      (water-filling), then most free, then oldest — spreading wear.
+ *   0. MEGA accounts are always filled first. Google Drive accounts are only
+ *      used once every MEGA account is at capacity for the file being placed.
+ *   1. Within each provider tier, every file of an artifact is placed WHOLE on
+ *      a single account when it fits. The account is chosen to minimise the
+ *      resulting used-percentage (water-filling), then most free, then oldest —
+ *      spreading wear evenly across all accounts of the same type.
  *   2. If a single file is bigger than any one account's free space, it is
  *      split into byte-range chunks distributed across several accounts
- *      (first-fit over free space). A manifest records the exact ranges so
- *      restore reassembles the file byte-perfectly.
+ *      (first-fit over free space, MEGA-first). A manifest records the exact
+ *      ranges so restore reassembles the file byte-perfectly.
  * The manifest is written to the cloud (`<root>/<kind>/<id>/__MANIFEST__.json`)
  * AND mirrored locally, so restore works even from a wiped machine.
  */
@@ -52,15 +55,35 @@ export function walkFiles(localDir) {
   return out;
 }
 
-/** Choose the account that minimises its resulting used-percentage. */
+/**
+ * Choose the best account to store `needed` bytes.
+ *
+ * Priority:
+ *   1. MEGA accounts are always preferred over Google Drive.
+ *      Only when ALL MEGA accounts are full (or have insufficient free space)
+ *      will Google Drive accounts be used.
+ *   2. Within each provider tier the classic water-filling strategy applies:
+ *      pick the account that results in the lowest used-percentage after
+ *      placing the file (most headroom wins on ties).
+ */
 export function chooseAccount(needed, accounts) {
+  // Tier 0 = mega, Tier 1 = gdrive / everything else.
+  const providerTier = (acc) => (acc.provider === 'mega' ? 0 : 1);
+
+  // Find the lowest tier that has at least one account with enough free space.
+  const eligible = accounts.filter((a) => a.free >= needed);
+  if (eligible.length === 0) return null;
+
+  const bestTier = Math.min(...eligible.map(providerTier));
+  const candidates = eligible.filter((a) => providerTier(a) === bestTier);
+
+  // Water-fill within the chosen tier: minimise resulting used-percentage.
   let best = null;
   let bestScore = Infinity;
-  for (const acc of accounts) {
-    if (acc.free < needed) continue;
+  for (const acc of candidates) {
     const quota = acc.total || 0;
     const score = quota ? (acc.used + needed) / quota : needed;
-    if (score < bestScore || (score === bestScore && (acc.free > (best?.free ?? -1)))) {
+    if (score < bestScore || (score === bestScore && acc.free > (best?.free ?? -1))) {
       bestScore = score;
       best = acc;
     }

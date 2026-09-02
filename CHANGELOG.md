@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.0] - 2026-09-02
+
+### Changed
+- **Account Limits** — Clarified in documentation that there is no limit to the number of MEGA or Google Drive accounts that can be added, and that MEGA accounts are always fully populated before any Google Drive fallback is used.
+- **Test Suite** — Fixed nested tests and assertion bugs in the e2e test suite that were causing false positive test failures during cloud pruning assertions.
+
 ## [1.0.18] - 2026-09-02
 
 ### Fixed

@@ -106,17 +106,32 @@ test('dueDay extracts the calendar day', () => {
 
 test('chooseAccount spreads small files onto the least-full account', () => {
   const accounts = [
-    { id: 'a', remote: 'm1', total: 100, used: 90, free: 10 },
-    { id: 'b', remote: 'm2', total: 100, used: 20, free: 80 },
+    { id: 'a', provider: 'mega',   remote: 'm1', total: 100, used: 90, free: 10 },
+    { id: 'b', provider: 'mega',   remote: 'm2', total: 100, used: 20, free: 80 },
   ];
   // m2 has room for 5, m1 does not.
   assert.equal(chooseAccount(5, accounts).remote, 'm2');
   // With both full-ish, pick the one with the highest relative headroom.
   const almost = [
-    { id: 'a', remote: 'm1', total: 100, used: 80, free: 20 },
-    { id: 'b', remote: 'm2', total: 100, used: 75, free: 25 },
+    { id: 'a', provider: 'mega', remote: 'm1', total: 100, used: 80, free: 20 },
+    { id: 'b', provider: 'mega', remote: 'm2', total: 100, used: 75, free: 25 },
   ];
   assert.equal(chooseAccount(10, almost).remote, 'm2');
+
+  // MEGA-first: even if gdrive has way more free space, pick mega while it fits.
+  const mixed = [
+    { id: 'c', provider: 'gdrive', remote: 'gd1', total: 15 * 1024 ** 3, used: 0,           free: 15 * 1024 ** 3 },
+    { id: 'd', provider: 'mega',   remote: 'mg1', total: 20 * 1024 ** 3, used: 18 * 1024 ** 3, free: 2 * 1024 ** 3 },
+  ];
+  // mega has 2 GiB free, gdrive has 15 GiB free — still pick mega.
+  assert.equal(chooseAccount(1 * 1024 ** 3, mixed).remote, 'mg1', 'mega preferred over gdrive');
+
+  // Fallback to gdrive only when ALL mega accounts cannot fit the file.
+  const megaFull = [
+    { id: 'e', provider: 'mega',   remote: 'mg2', total: 20 * 1024 ** 3, used: 20 * 1024 ** 3, free: 0 },
+    { id: 'f', provider: 'gdrive', remote: 'gd2', total: 15 * 1024 ** 3, used: 0,             free: 15 * 1024 ** 3 },
+  ];
+  assert.equal(chooseAccount(1 * 1024 ** 3, megaFull).remote, 'gd2', 'falls back to gdrive when mega full');
 });
 
 test('walkFiles returns files + dirs with sane sizes, skipping symlinks', () => {

@@ -1,8 +1,10 @@
 /**
  * Storage accounts — the gitswitch-style account manager for the multi-cloud
  * pool. Each account maps to ONE rclone remote (one MEGA or Google Drive
- * login). 5 MEGA + 5 Drive accounts with ~20GiB / ~15GiB each ≈ 175GiB that the
- * allocator can spread backups across so we are never out of space.
+ * login). You can add any number of MEGA and/or Google Drive accounts — e.g.
+ * 2, 5, 11, or even 30 of each. MEGA accounts are always filled first; the
+ * allocator only spills over to Google Drive once every MEGA account is at
+ * capacity.
  */
 
 import crypto from 'node:crypto';

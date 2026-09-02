@@ -348,6 +348,14 @@ test('snapshot now: create → upload → manifest, cloud + local prune', async 
 
   // keep=3 → the two oldest (06-24, 07-01) pruned; 07-08 + 07-15 + new stay.
   const after = fs.readdirSync(tsSnaps);
+  assert.ok(!after.includes('2026-06-24_10-00-00'), 'oldest snapshot pruned locally');
+  assert.ok(!after.includes('2026-07-01_10-00-00'), 'second-old snapshot pruned locally');
+  assert.ok(after.includes('2026-07-08_10-00-00'), '07-08 kept');
+  assert.ok(after.includes('2026-07-15_10-00-00'), '07-15 kept');
+  assert.ok(cloudAvail.filter((d) => d.startsWith('2026-') && !d.includes('/')).length <= 3, 'cloud snapshot count bounded by keep');
+  assert.ok(!cloudAvail.includes('2026-06-24_10-00-00'), 'cloud prune in the same pass');
+});
+
 test('snapshot now works even when timeshift --list requires admin (real-world bug)', async () => {
   const s = setupSandbox('snapsudo');
   populateHome(s);
@@ -370,13 +378,6 @@ test('snapshot now works even when timeshift --list requires admin (real-world b
   assert.equal(localDirs.length, 1, `one local snapshot, got ${localDirs.join(',')}`);
   const cloudAvail = cloudDirs(s.env, 'megaSnap', 'parrot-blackbox/snapshots');
   assert.ok(cloudAvail.includes(localDirs[0]), `cloud snapshot uploaded; got ${cloudAvail.join(',')}`);
-});
-  assert.ok(!after.includes('2026-06-24_10-00-00'), 'oldest snapshot pruned locally');
-  assert.ok(!after.includes('2026-07-01_10-00-00'), 'second-old snapshot pruned locally');
-  assert.ok(after.includes('2026-07-08_10-00-00'), '07-08 kept');
-  assert.ok(after.includes('2026-07-15_10-00-00'), '07-15 kept');
-  assert.ok(cloudAvail.filter((d) => d.startsWith('2026-')).length <= 3, 'cloud snapshot count bounded by keep');
-  assert.ok(!cloudAvail.includes('2026-06-24_10-00-00'), 'cloud prune in the same pass');
 });
 test('network probe is online when ANY reachable host answers (multi-host failover)', async () => {
   const s = setupSandbox('netmulti');
