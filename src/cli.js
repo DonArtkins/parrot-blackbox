@@ -97,7 +97,7 @@ async function snapshotList() {
   const accs = listAccounts();
   console.log(`${pc.bold('\nLocal snapshots (Timeshift):')}`);
   try {
-    const local = await listLocalSnapshots({ privileged: 'noninteractive' });
+    const local = await listLocalSnapshots({ privileged: process.stdin.isTTY ? 'interactive' : 'noninteractive' });
     if (local.length === 0) console.log(`  ${pc.dim('none')}`);
     for (const s of local) console.log(`  - ${pc.cyan(s.name)}  ${pc.dim(s.tags)}`);
   } catch (e) {
@@ -379,7 +379,7 @@ const main = defineCommand({
         return runSelfUpdate({ force: process.argv.includes('--force') });
 
       case 'run':
-        process.exitCode = await invokeRun('noninteractive');
+        process.exitCode = await invokeRun(process.stdin.isTTY ? 'interactive' : 'noninteractive');
         return;
 
       case 'force':
@@ -538,6 +538,21 @@ const main = defineCommand({
           s.stop('✖ Upload failed');
           console.error(`_internal_upload failed: ${e.message}`);
           process.exitCode = 1;
+        } finally {
+          // If we are running as root via sudo, rclone might have refreshed OAuth tokens
+          // and rewritten rclone.conf as root:root. Restore ownership to the real user.
+          if (process.getuid && process.getuid() === 0 && process.env.SUDO_UID && process.env.SUDO_GID) {
+            import('node:fs').then(fs => {
+              import('node:path').then(path => {
+                const confPath = path.join(process.env.HOME, '.config', 'rclone', 'rclone.conf');
+                if (fs.existsSync(confPath)) {
+                  try {
+                    fs.chownSync(confPath, parseInt(process.env.SUDO_UID, 10), parseInt(process.env.SUDO_GID, 10));
+                  } catch { /* best effort */ }
+                }
+              });
+            });
+          }
         }
         return;
       }

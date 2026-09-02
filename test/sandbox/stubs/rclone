@@ -74,17 +74,26 @@ case "$cmd" in
     if [ -n "$files_from" ]; then
       while IFS= read -r file; do
          [ -z "$file" ] && continue
-         lp=$(stub_path "$dest/$file")
-         mkdir -p "$(dirname "$lp")"
-         remote="${dest%%:*}"
-         used=$(du -sb "$CLOUD_ROOT/$remote" 2>/dev/null | cut -f1); used=${used:-0}
-         total=$(cat "$CLOUD_ROOT/$remote.quota" 2>/dev/null || echo 10737418240)
-         add=$(stat -c%s "$src/$file")
-         if [ $(( used + add )) -gt $total ]; then
-           echo "rclone-stub: insufficient quota on $remote ($used + $add > $total)" >&2
-           exit 1
+         
+         if [[ "$src" == *:* && "$dest" != *:* ]]; then
+           # remote -> local (restore)
+           srcp=$(stub_path "$src/$file")
+           mkdir -p "$(dirname "$dest/$file")"
+           cp -f "$srcp" "$dest/$file" || { echo "rclone-stub: batch copy from $srcp failed" >&2; exit 1; }
+         else
+           # local -> remote (upload)
+           lp=$(stub_path "$dest/$file")
+           mkdir -p "$(dirname "$lp")"
+           remote="${dest%%:*}"
+           used=$(du -sb "$CLOUD_ROOT/$remote" 2>/dev/null | cut -f1); used=${used:-0}
+           total=$(cat "$CLOUD_ROOT/$remote.quota" 2>/dev/null || echo 10737418240)
+           add=$(stat -c%s "$src/$file")
+           if [ $(( used + add )) -gt $total ]; then
+             echo "rclone-stub: insufficient quota on $remote ($used + $add > $total)" >&2
+             exit 1
+           fi
+           cp -f "$src/$file" "$lp"
          fi
-         cp -f "$src/$file" "$lp"
       done < "$files_from"
       exit 0
     fi

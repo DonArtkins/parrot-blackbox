@@ -19,7 +19,7 @@ import { stateDir, timeshiftDir } from '../core/paths.js';
 import { refreshAccounts } from '../storage/accounts.js';
 import { discoverManifest, restoreArtifact } from '../storage/archive.js';
 import { listLocalSnapshots } from './snapshot.js';
-import { sudoInteractive } from '../util/sudo.js';
+import { ensureSudo, sudoInteractive } from '../util/sudo.js';
 import { bytesHuman } from '../util/misc.js';
 
 /** Restore a file backup generation into a writable local directory. */
@@ -67,6 +67,7 @@ export async function restoreSnapshot({ id, accounts, cfg, toDir, confirm = fals
 
   // Run the actual restore (interactive sudo → the password prompt is visible).
   console.log(`\nRestoring snapshot ${id} over the current system…\n`);
+  await ensureSudo();
   const res = await sudoInteractive(['timeshift', '--restore', '--snapshot', id, '--yes']);
   if (res.exitCode !== 0) throw new Error(`timeshift --restore failed (exit ${res.exitCode})`);
   journal('restore', `snapshot id=${id} RESTORED`);
@@ -79,6 +80,7 @@ async function placeIntoTimeshift(id, tmpRoot, cfg, privileged) {
   const base = determineSnapshotBase();
   const target = path.join(base, id);
   const cmd = `mkdir -p ${shq(base)} && rm -rf ${shq(target)} && cp -a ${shq(tmpRoot)}/. ${shq(target)}/ && chown -R root:root ${shq(target)}`;
+  await ensureSudo();
   const res = await sudoInteractive(['bash', '-c', cmd]);
   if (res.exitCode !== 0) throw new Error(`could not move snapshot into ${base} (exit ${res.exitCode})`);
   return target;

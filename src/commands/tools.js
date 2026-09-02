@@ -8,6 +8,7 @@ import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { execa } from 'execa';
 import { hasCommandSync } from '../core/store.js';
+import { ensureSudo, sudoInteractive } from '../util/sudo.js';
 
 export const REQUIRED = [
   { bin: 'rclone', pkg: 'rclone', why: 'talks to MEGA / Google Drive (cloud storage)' },
@@ -59,7 +60,8 @@ export async function ensureSystemTools() {
     s.stop(''); // release the terminal first so the sudo password prompt is usable
     try {
       const args = pm === 'pacman' ? ['-S', '--noconfirm', tool.pkg] : [pm, 'install', '-y', tool.pkg];
-      const res = await execa('sudo', args, { stdio: 'inherit', reject: false });
+      await ensureSudo();
+      const res = await sudoInteractive([pm, ...args.slice(1)]);
       if (res.exitCode === 0 && hasCommandSync(tool.bin)) {
         p.log.success(`${pc.cyan(tool.bin)} installed.`);
         installed.push(tool.bin);

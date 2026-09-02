@@ -129,6 +129,12 @@ export function seedCloudManifest(env, remote, kind, id) {
     entries: [],
   };
   fs.writeFileSync(path.join(dir, '__MANIFEST__.json'), JSON.stringify(manifest, null, 2));
+  
+  // Also write the local manifest mirror so it's recognized as fully uploaded
+  const localManDir = path.join(env.PBB_STATE_DIR, 'manifests');
+  fs.mkdirSync(localManDir, { recursive: true });
+  fs.writeFileSync(path.join(localManDir, `${kind}-${id}.json`), JSON.stringify(manifest, null, 2));
+  
   return dir;
 }
 

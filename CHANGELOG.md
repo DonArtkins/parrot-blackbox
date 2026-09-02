@@ -1,9 +1,19 @@
 # Changelog
 
-All notable changes to **parrot-blackbox** are documented here. This project
-adheres to [Semantic Versioning](https://semver.org/).
+## [1.0.15] - 2026-09-02
 
-## [1.0.12] - 2026-09-02
+### Fixed
+- **Accounts disappearing after backup (rclone.conf permission denied)** — When `_internal_upload` ran as root to access BTRFS snapshots, `rclone` would sometimes refresh Google Drive OAuth tokens and rewrite `~/.config/rclone/rclone.conf` as `root:root`. This locked the normal user out of their own cloud accounts, causing the tool to drop the pool entries on the next `repair`. The upload routine now restores `rclone.conf` ownership to the original user (`SUDO_UID`:`SUDO_GID`) before exiting.
+
+## [1.0.14] - 2026-09-02
+
+### Added
+- **Upload Resume Support** — If a snapshot upload is interrupted due to a power cut, network failure, or API rate limits, the next upload run will automatically detect the un-uploaded snapshot and resume exactly where it left off, skipping already uploaded chunks instead of starting a new snapshot from scratch.
+
+### Fixed
+- **Google Drive "directory not found" upload failure** — Addressed an issue where `rclone copy --files-from` would fail when writing to a newly generated remote destination directory. `parrot-blackbox` now explicitly creates the root remote directory (`rclone mkdir`) before batching files to ensure seamless uploads.
+
+## [1.0.13] - 2026-09-02
 
 ### Fixed
 - **BTRFS snapshot upload EACCES permissions error** — `fs.readdirSync` failed when scanning root-owned files (like `/etc/credstore`) inside the Timeshift BTRFS mount. The upload logic is now run through an internal privileged helper (`sudo -E node ... _internal_upload`), allowing full traversal and chunking of BTRFS files while preserving the exact interactive sudo password prompt behavior used in other tools (e.g. gitswitch).
@@ -183,7 +193,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   rclone/timeshift/sudo binaries and a fake cloud, so the Level-5 destructive
   paths are proven safe before any real use.
 
-[1.0.12]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.12
+[1.0.13]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.13
 [1.0.10]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.10
 [1.0.9]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.9
 [1.0.8]: https://github.com/DonArtkins/parrot-blackbox/releases/tag/v1.0.8

@@ -9,6 +9,7 @@ import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { execa } from 'execa';
 import { loadConfig, journal, hasCommandSync } from '../core/store.js';
+import { ensureSudo, sudoInteractive } from '../util/sudo.js';
 import { listAccounts, refreshAccounts, poolSummary } from '../storage/accounts.js';
 import { installService } from './service.js';
 import { runDueJobs } from '../daemon/scheduler.js';
@@ -58,7 +59,8 @@ async function ensureSystemTools() {
     s.stop('');
     try {
       const args = pm === 'pacman' ? ['-S', '--noconfirm', tool.pkg] : [pm, 'install', '-y', tool.pkg];
-      const res = await execa('sudo', args, { stdio: 'inherit', reject: false });
+      await ensureSudo();
+      const res = await sudoInteractive([pm, ...args.slice(1)]);
       if (res.exitCode === 0 && hasCommandSync(tool.bin)) {
         p.log.success(`${pc.cyan(tool.bin)} installed.`);
         installed.push(tool.bin);

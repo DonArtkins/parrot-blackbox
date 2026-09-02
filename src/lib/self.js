@@ -8,6 +8,7 @@
 import { execa } from 'execa';
 import pc from 'picocolors';
 import { createRequire } from 'node:module';
+import { ensureSudo, sudoInteractive } from '../util/sudo.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -66,9 +67,18 @@ export async function promptSelfUpdate() {
 
   // Release the terminal so npm's progress & any prompts are visible/interruptible.
   console.log();
-  const res = await execa('npm', ['install', '-g', `${NPM_NAME}@latest`], { stdio: 'inherit', reject: false });
+  let res = await execa('npm', ['install', '-g', `${NPM_NAME}@latest`], { stdio: 'inherit', reject: false });
   if (res.exitCode !== 0) {
-    p.log.warn('Update failed. You can retry with: npm install -g ' + NPM_NAME + '@latest');
+    p.log.warn('Update failed. Attempting again with sudo...');
+    try {
+      await ensureSudo();
+      res = await sudoInteractive(['npm', 'install', '-g', `${NPM_NAME}@latest`]);
+    } catch {
+      // Fall through to error
+    }
+  }
+  if (res.exitCode !== 0) {
+    p.log.warn('Update failed. You can retry with: sudo npm install -g ' + NPM_NAME + '@latest');
     return false;
   }
   p.log.success(`Updated to v${latest}. ` + 'Run `parrot-blackbox` again to use the new version.');
@@ -99,9 +109,18 @@ export async function runSelfUpdate({ force = false } = {}) {
   const want = await p.confirm({ message: `Update parrot-blackbox to v${latest} now?`, initialValue: true });
   if (p.isCancel(want) || !want) { p.log.message(pc.dim('Update skipped.')); return false; }
   console.log();
-  const res = await execa('npm', ['install', '-g', `${NPM_NAME}@latest`], { stdio: 'inherit', reject: false });
+  let res = await execa('npm', ['install', '-g', `${NPM_NAME}@latest`], { stdio: 'inherit', reject: false });
   if (res.exitCode !== 0) {
-    p.log.warn('Update failed. You can retry with: npm install -g ' + NPM_NAME + '@latest');
+    p.log.warn('Update failed. Attempting again with sudo...');
+    try {
+      await ensureSudo();
+      res = await sudoInteractive(['npm', 'install', '-g', `${NPM_NAME}@latest`]);
+    } catch {
+      // Fall through to error
+    }
+  }
+  if (res.exitCode !== 0) {
+    p.log.warn('Update failed. You can retry with: sudo npm install -g ' + NPM_NAME + '@latest');
     return false;
   }
   p.log.success(`Updated to v${latest}. Restart parrot-blackbox to use the new version.`);
@@ -112,7 +131,16 @@ export async function runSelfUpdate({ force = false } = {}) {
 export async function selfUninstall() {
   const p = await import('@clack/prompts');
   console.log();
-  const res = await execa('npm', ['uninstall', '-g', NPM_NAME], { stdio: 'inherit', reject: false });
+  let res = await execa('npm', ['uninstall', '-g', NPM_NAME], { stdio: 'inherit', reject: false });
+  if (res.exitCode !== 0) {
+    p.log.warn('Uninstall failed. Attempting again with sudo...');
+    try {
+      await ensureSudo();
+      res = await sudoInteractive(['npm', 'uninstall', '-g', NPM_NAME]);
+    } catch {
+      // Fall through to error
+    }
+  }
   if (res.exitCode === 0) {
     p.log.success(`${NPM_NAME} removed. The parrot-blackbox command is no longer available.`);
     return true;

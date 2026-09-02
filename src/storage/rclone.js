@@ -84,6 +84,19 @@ export async function copyBatch(localDir, remotePath, filesFromPath) {
   return { ok: res.exitCode === 0, exitCode: res.exitCode, error: res.stderr?.trim() };
 }
 
+/** Download a batch of files using --files-from (reverse of copyBatch). */
+export async function downloadBatch(remotePath, localDir, filesFromPath) {
+  const args = [
+    'copy', remotePath, localDir,
+    '--files-from', filesFromPath,
+    '--transfers=16',
+    '--checkers=16',
+    '--fast-list'
+  ];
+  const res = await rejectFalse(args);
+  return { ok: res.exitCode === 0, exitCode: res.exitCode, error: res.stderr?.trim() };
+}
+
 /** Create a remote directory. */
 export async function mkdirRemote(remotePath) {
   const res = await rejectFalse(['mkdir', remotePath]);

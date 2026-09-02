@@ -17,7 +17,7 @@ import { refreshAccounts } from '../storage/accounts.js';
 import { planAndPlace } from '../storage/allocator.js';
 import { listArtifacts, removeArtifact } from '../storage/archive.js';
 import { planPrune } from './retention.js';
-import { sudoInteractive, sudoNonInteractive, sudoInteractiveCapture } from '../util/sudo.js';
+import { sudoInteractive, sudoNonInteractive, sudoInteractiveCapture, sudoExecSync, ensureSudo } from '../util/sudo.js';
 
 export class SudoDeferredError extends Error {
   constructor() {
@@ -96,6 +96,7 @@ function findPathInLine(line) {
 async function runTimeshiftList({ privileged = 'noninteractive' } = {}) {
   if (privileged === 'interactive') {
     try {
+      await ensureSudo();
       const res = await sudoInteractiveCapture(['timeshift', '--list']);
       return (res.exitCode === 0 ? res.stdout : res.stdout || res.stderr) || '';
     } catch {
@@ -124,6 +125,7 @@ export async function createSnapshot({ comment, privileged = 'noninteractive' } 
 
   let createOut = '';
   if (privileged === 'interactive') {
+    await ensureSudo();
     const res = await sudoInteractiveCapture(args);
     if (res.exitCode !== 0) throw new Error(`timeshift --create failed (exit ${res.exitCode})`);
     createOut = `${res.stdout || ''} ${res.stderr || ''}`;
@@ -154,6 +156,7 @@ export async function createSnapshot({ comment, privileged = 'noninteractive' } 
 export async function deleteSnapshot(name, { privileged = 'noninteractive' } = {}) {
   const args = ['timeshift', '--delete', '--snapshot', name];
   if (privileged === 'interactive') {
+    await ensureSudo();
     const res = await sudoInteractive(args);
     if (res.exitCode !== 0) throw new Error(`timeshift --delete ${name} failed (exit ${res.exitCode})`);
     return true;
@@ -201,15 +204,10 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
     
     if (device && deviceResult.exitCode === 0) {
       // Create temporary mount point
-      const mkdirCmd = privileged === 'interactive' ? ['sudo', 'mkdir', '-p', mountPoint] : ['sudo', '-n', 'mkdir', '-p', mountPoint];
-      execaSync(mkdirCmd[0], mkdirCmd.slice(1), { reject: false });
+      sudoExecSync(['mkdir', '-p', mountPoint]);
       
       // Mount BTRFS root subvolume (subvolid=5 contains all subvolumes including snapshots)
-      const mountCmd = privileged === 'interactive' 
-        ? ['sudo', 'mount', '-o', 'subvolid=5', device, mountPoint]
-        : ['sudo', '-n', 'mount', '-o', 'subvolid=5', device, mountPoint];
-      
-      const mountResult = execaSync(mountCmd[0], mountCmd.slice(1), { reject: false, timeout: 5000 });
+      const mountResult = sudoExecSync(['mount', '-o', 'subvolid=5', device, mountPoint]);
       
       if (mountResult.exitCode === 0) {
         // Search for the snapshot in the mounted root subvolume
@@ -228,9 +226,8 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
         }
         
         // Unmount if we didn't find anything
-        const umountCmd = privileged === 'interactive' ? ['sudo', 'umount', mountPoint] : ['sudo', '-n', 'umount', mountPoint];
-        execaSync(umountCmd[0], umountCmd.slice(1), { reject: false });
-        execaSync('sudo', ['-n', 'rmdir', mountPoint], { reject: false });
+        sudoExecSync(['umount', mountPoint]);
+        sudoExecSync(['rmdir', mountPoint]);
       }
     }
   } catch {
@@ -245,8 +242,8 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
 export function cleanupSnapshotMount(snapshot) {
   if (snapshot._tempMount) {
     try {
-      execaSync('sudo', ['-n', 'umount', snapshot._tempMount], { reject: false });
-      execaSync('sudo', ['-n', 'rmdir', snapshot._tempMount], { reject: false });
+      sudoExecSync(['umount', snapshot._tempMount]);
+      sudoExecSync(['rmdir', snapshot._tempMount]);
       delete snapshot._tempMount;
     } catch {
       /* best effort */
@@ -263,7 +260,34 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
   journal('snapshots', `start due=${due} privileged=${privileged}`);
   const accounts = await refreshAccounts(cfg);
 
-  const created = await createSnapshot({ comment: `parrot-blackbox ${due}`, privileged });
+  // Resume logic: if the most recent local snapshot has no local manifest,
+  // it means its previous upload failed or was interrupted. We should resume it
+  // to avoid re-uploading everything to a new snapshot ID.
+  const localSnaps = await listLocalSnapshots({ privileged });
+  const manifestLocalDir = process.env.PBB_MANIFESTS_DIR || path.join(process.env.PBB_STATE_DIR || '.', 'manifests');
+  
+  let created = null;
+  // Look at snapshots from newest to oldest
+  for (let i = localSnaps.length - 1; i >= 0; i--) {
+    const s = localSnaps[i];
+    if (s.tags.includes('W') || (s.line && s.line.includes('parrot-blackbox'))) {
+      const manPath = path.join(manifestLocalDir, `snapshots-${s.name}.json`);
+      if (!fs.existsSync(manPath)) {
+        created = s;
+        journal('snapshots', `resuming upload for incomplete snapshot ${s.name}`);
+        break;
+      } else {
+        // The most recent parrot-blackbox snapshot is fully uploaded. We can break
+        // and create a new one.
+        break;
+      }
+    }
+  }
+
+  if (!created) {
+    created = await createSnapshot({ comment: `parrot-blackbox ${due}`, privileged });
+  }
+
   const dir = snapshotDirFor(created, { privileged });
 
   let manifest;
@@ -275,6 +299,7 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
     
     let res;
     if (privileged === 'interactive') {
+      await ensureSudo();
       res = await sudoInteractive(args);
     } else {
       res = await sudoNonInteractive(args);

@@ -145,6 +145,10 @@ export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, c
     const batchPath = path.join(batchDir, `batch-${remote.replace(/[^a-z0-9]/gi, '_')}-${Date.now()}.txt`);
     fs.writeFileSync(batchPath, batch.files.join('\n') + '\n');
     
+    // Ensure the remote directory exists to prevent "directory not found" errors
+    // when rclone tries to list the destination for --files-from checking.
+    await mkdirRemote(`${remote}:${basePath}`);
+    
     report(placed, `uploading batch of ${batch.files.length} files to ${remote}...`);
     const res = await copyBatch(localDir, `${remote}:${basePath}`, batchPath);
     if (!res.ok) throw new Error(`batch upload failed to ${remote}: ${res.error}`);
