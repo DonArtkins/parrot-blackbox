@@ -1,10 +1,16 @@
 # Changelog
 
+## [1.0.18] - 2026-09-02
+
+### Fixed
+- **Resume tracker uses wrong data source** — The snapshot resume logic was checking `state.manifests` (the in-memory JSON blob) to decide whether a local snapshot had been fully uploaded. This blob is always empty after a reinstall or fresh state, so every existing local snapshot was incorrectly treated as incomplete and retried instead of letting a new one be created. The check now looks at the actual manifest **files on disk** (`~/.local/state/parrot-blackbox/manifests/snapshots-<name>.json`), which are written by the allocator and survive reinstalls.
+- **Early account guard** — `snapshot now` now fails immediately with a clear message if no storage accounts are configured, instead of silently creating a local Timeshift snapshot that can never be uploaded.
+- **Resume Upload menu option** — Added an explicit `⏳ Resume upload` entry to the wizard main menu so users can manually trigger the resume tracker without needing to know the CLI subcommand.
+
 ## [1.0.17] - 2026-09-02
 
 ### Fixed
 - **Storage Accounts Missing During Snapshot Upload** — Fixed an issue where `parrot-blackbox snapshot now` would fail to upload with a "no storage accounts configured" error because the internal `sudo` process lost the user's `HOME` directory and `PBB_STATE_DIR` variables, causing it to look in `/root`.
-- **Snapshot Resume Logic** — Fixed the upload resume tracker so it correctly checks the application state database rather than non-existent local JSON files. If a snapshot upload is interrupted, the CLI will now properly resume uploading that exact snapshot instead of creating a brand new one.
 
 ## [1.0.16] - 2026-09-02
 
