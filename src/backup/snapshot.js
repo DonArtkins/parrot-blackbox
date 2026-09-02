@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execa, execaSync } from 'execa';
 import { loadConfig, loadState, saveState, journal, hasCommandSync } from '../core/store.js';
-import { timeshiftDir, stateDir, configFile } from '../core/paths.js';
+import { timeshiftDir, stateDir, configFile, manifestsDir } from '../core/paths.js';
 import { iso, clock } from '../core/time.js';
 import { refreshAccounts } from '../storage/accounts.js';
 import { planAndPlace } from '../storage/allocator.js';
@@ -259,22 +259,31 @@ export function cleanupSnapshotMount(snapshot) {
 export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninteractive', onProgress } = {}) {
   journal('snapshots', `start due=${due} privileged=${privileged}`);
   const accounts = await refreshAccounts(cfg);
+  
+  if (accounts.length === 0) {
+    throw new Error('no storage accounts configured — add one with `parrot-blackbox account add`');
+  }
 
   let created = null;
   const localSnaps = await listLocalSnapshots({ privileged });
   
-  // Look at snapshots from newest to oldest
+  // Look at snapshots from newest to oldest; find the most recent one that
+  // belongs to parrot-blackbox and has not been fully uploaded yet.
   for (let i = localSnaps.length - 1; i >= 0; i--) {
     const s = localSnaps[i];
     if (s.tags.includes('W') || (s.line && s.line.includes('parrot-blackbox'))) {
-      // Check if the manifest exists in the application state
-      if (!state.manifests || !state.manifests[`snapshots-${s.name}`]) {
+      // Check for the manifest FILE on disk — this is the authoritative source.
+      // state.manifests (the in-memory JSON blob) may be empty on the first run
+      // or after a reinstall, so we cannot rely on it alone.
+      const manifestFile = path.join(manifestsDir(), `snapshots-${s.name}.json`);
+      const isUploaded = fs.existsSync(manifestFile);
+      if (!isUploaded) {
         created = s;
         journal('snapshots', `resuming upload for incomplete snapshot ${s.name}`);
+        console.log(`\n⏳ Resuming incomplete upload for snapshot ${s.name} (from tracker)...`);
         break;
       } else {
-        // The most recent parrot-blackbox snapshot is fully uploaded. We can break
-        // and create a new one.
+        // The most recent parrot-blackbox snapshot is fully uploaded — create a new one.
         break;
       }
     }

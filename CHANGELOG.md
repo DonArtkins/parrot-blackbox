@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.17] - 2026-09-02
+
+### Fixed
+- **Storage Accounts Missing During Snapshot Upload** — Fixed an issue where `parrot-blackbox snapshot now` would fail to upload with a "no storage accounts configured" error because the internal `sudo` process lost the user's `HOME` directory and `PBB_STATE_DIR` variables, causing it to look in `/root`.
+- **Snapshot Resume Logic** — Fixed the upload resume tracker so it correctly checks the application state database rather than non-existent local JSON files. If a snapshot upload is interrupted, the CLI will now properly resume uploading that exact snapshot instead of creating a brand new one.
+
 ## [1.0.16] - 2026-09-02
 
 ### Changed

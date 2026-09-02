@@ -319,6 +319,7 @@ export async function runWizard() {
       message: 'What would you like to do?',
       options: [
         { value: 'snapshot', label: '📸 Create snapshot', hint: 'backup your system now' },
+        { value: 'resume', label: '⏳ Resume upload', hint: 'resume incomplete backup uploads' },
         { value: 'backup', label: '💾 Run all backups', hint: 'snapshots + file backups' },
         { value: 'restore', label: '♻️  Restore backup', hint: 'files or system snapshot' },
         { value: 'list', label: '📋 List backups', hint: 'see what\'s saved' },
@@ -348,6 +349,7 @@ export async function runWizard() {
         case 'accounts': await accountsMenu(); break;
         case 'tools': await runToolsCheck(); break;
         case 'snapshot': await snapshotNowAction(); break;
+        case 'resume': await snapshotNowAction(); break;
         case 'backup': await backupNowAction(); break;
         case 'list': await listBackupsAction(); break;
         case 'restore': await restoreMenu(); break;
