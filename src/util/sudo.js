@@ -78,16 +78,16 @@ export function isSudoArmed() {
  * For daemon/non-interactive use, pass { interactive: false } — it will use
  * `sudo -n` and never hang on a prompt.
  */
-export async function sudoExec(args, { interactive = true, capture = false, timeout = 0 } = {}) {
+export async function sudoExec(args, { interactive = true, capture = false, timeout = 0, env = {} } = {}) {
   if (interactive && process.stdin.isTTY) {
     // Ensure the sudo timestamp is armed before running the command.
     await ensureSudo();
     if (capture) {
-      return sudoInteractiveCapture(args, { timeout });
+      return sudoInteractiveCapture(args, { timeout, env });
     }
-    return sudoInteractive(args, { timeout });
+    return sudoInteractive(args, { timeout, env });
   }
-  return sudoNonInteractive(args);
+  return sudoNonInteractive(args, { env });
 }
 
 /**
@@ -95,26 +95,26 @@ export async function sudoExec(args, { interactive = true, capture = false, time
  * Requires that ensureSudo() was called earlier in the session.
  * Falls back to non-interactive sudo; if that fails, falls back to direct execution.
  */
-export function sudoExecSync(args, { reject = false } = {}) {
+export function sudoExecSync(args, { reject = false, env = {} } = {}) {
   if (process.env.PBB_SUDO_DIRECT === '1') {
-    return execaSync(args[0], args.slice(1), { reject });
+    return execaSync(args[0], args.slice(1), { reject, env: { ...process.env, ...env } });
   }
   // Try with sudo (timestamp should be armed from earlier ensureSudo call)
   const full = ['sudo', '-n', ...args];
-  const res = execaSync(full[0], full.slice(1), { reject: false });
+  const res = execaSync(full[0], full.slice(1), { reject: false, env: { ...process.env, ...env } });
   if (res.exitCode === 0) return res;
   // If sudo -n fails, try sudo with inherited stdio (will prompt if TTY available)
   if (process.stdin?.isTTY) {
-    return execaSync('sudo', args, { reject, stdio: 'inherit' });
+    return execaSync('sudo', args, { reject, stdio: 'inherit', env: { ...process.env, ...env } });
   }
   // Last resort: try without sudo (some operations work unprivileged)
-  return execaSync(args[0], args.slice(1), { reject: false });
+  return execaSync(args[0], args.slice(1), { reject: false, env: { ...process.env, ...env } });
 }
 
 /** Interactive sudo baseline for injecting PBB_SUDO_DIRECT consistent with the rest. */
-export async function sudoInteractive(args, { timeout = 0 } = {}) {
+export async function sudoInteractive(args, { timeout = 0, env = {} } = {}) {
   const full = [...sudoPrefix(), ...args];
-  const res = await execa(full[0], full.slice(1), { stdio: 'inherit', reject: false, timeout });
+  const res = await execa(full[0], full.slice(1), { stdio: 'inherit', reject: false, timeout, env: { ...process.env, ...env } });
   if (res.exitCode !== 0) {
     throw new Error(`elevated command failed: ${args.join(' ')} (exit ${res.exitCode})`);
   }
@@ -126,9 +126,9 @@ export async function sudoInteractive(args, { timeout = 0 } = {}) {
  * the parser) while keeping stdin inherited so the password prompt stays
  * usable — like the real sudo, which reads passwords from /dev/tty.
  */
-export async function sudoInteractiveCapture(args, { timeout = 0 } = {}) {
+export async function sudoInteractiveCapture(args, { timeout = 0, env = {} } = {}) {
   const full = [...sudoPrefix(), ...args];
-  const res = await execa(full[0], full.slice(1), { stdin: 'inherit', reject: false, timeout });
+  const res = await execa(full[0], full.slice(1), { stdin: 'inherit', reject: false, timeout, env: { ...process.env, ...env } });
   if (res.exitCode !== 0) {
     throw new Error(`elevated command failed: ${args.join(' ')} (exit ${res.exitCode})`);
   }
@@ -136,9 +136,9 @@ export async function sudoInteractiveCapture(args, { timeout = 0 } = {}) {
 }
 
 /** Non-interactive sudo (daemon-safe). Returns execa result, never hangs. */
-export async function sudoNonInteractive(args) {
+export async function sudoNonInteractive(args, { env = {} } = {}) {
   const full = process.env.PBB_SUDO_DIRECT === '1' ? args : ['sudo', '-n', ...args];
-  const res = await execa(full[0], full.slice(1), { reject: false });
+  const res = await execa(full[0], full.slice(1), { reject: false, env: { ...process.env, ...env } });
   return res;
 }
 

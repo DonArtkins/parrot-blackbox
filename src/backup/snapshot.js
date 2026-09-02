@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execa, execaSync } from 'execa';
 import { loadConfig, loadState, saveState, journal, hasCommandSync } from '../core/store.js';
-import { timeshiftDir } from '../core/paths.js';
+import { timeshiftDir, stateDir, configFile } from '../core/paths.js';
 import { iso, clock } from '../core/time.js';
 import { refreshAccounts } from '../storage/accounts.js';
 import { planAndPlace } from '../storage/allocator.js';
@@ -260,19 +260,15 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
   journal('snapshots', `start due=${due} privileged=${privileged}`);
   const accounts = await refreshAccounts(cfg);
 
-  // Resume logic: if the most recent local snapshot has no local manifest,
-  // it means its previous upload failed or was interrupted. We should resume it
-  // to avoid re-uploading everything to a new snapshot ID.
-  const localSnaps = await listLocalSnapshots({ privileged });
-  const manifestLocalDir = process.env.PBB_MANIFESTS_DIR || path.join(process.env.PBB_STATE_DIR || '.', 'manifests');
-  
   let created = null;
+  const localSnaps = await listLocalSnapshots({ privileged });
+  
   // Look at snapshots from newest to oldest
   for (let i = localSnaps.length - 1; i >= 0; i--) {
     const s = localSnaps[i];
     if (s.tags.includes('W') || (s.line && s.line.includes('parrot-blackbox'))) {
-      const manPath = path.join(manifestLocalDir, `snapshots-${s.name}.json`);
-      if (!fs.existsSync(manPath)) {
+      // Check if the manifest exists in the application state
+      if (!state.manifests || !state.manifests[`snapshots-${s.name}`]) {
         created = s;
         journal('snapshots', `resuming upload for incomplete snapshot ${s.name}`);
         break;
@@ -293,16 +289,21 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
   let manifest;
   try {
     const bin = process.argv[1] || 'parrot-blackbox';
-    const outPath = path.join(process.env.PBB_STATE_DIR || '/tmp', `manifest-${created.name}.json`);
-    const baseArgs = [process.execPath, bin, '_internal_upload', dir, 'snapshots', created.name, cfg.storage.remoteRoot, String(cfg.storage.chunkSize), outPath];
-    const args = process.env.PBB_SUDO_DIRECT === '1' ? baseArgs : ['-E', ...baseArgs];
+    const outPath = path.join(stateDir(), `manifest-${created.name}.json`);
+    const envVars = {
+      HOME: process.env.HOME,
+      PBB_STATE_DIR: stateDir(),
+      PBB_CONFIG_FILE: configFile()
+    };
+    const cmdArgs = [process.execPath, bin, '_internal_upload', dir, 'snapshots', created.name, cfg.storage.remoteRoot, String(cfg.storage.chunkSize), outPath];
+    const args = process.env.PBB_SUDO_DIRECT === '1' ? cmdArgs : ['-E', ...cmdArgs];
     
     let res;
     if (privileged === 'interactive') {
       await ensureSudo();
-      res = await sudoInteractive(args);
+      res = await sudoInteractive(args, { env: envVars });
     } else {
-      res = await sudoNonInteractive(args);
+      res = await sudoNonInteractive(args, { env: envVars });
     }
     
     if (res.exitCode !== 0) {
