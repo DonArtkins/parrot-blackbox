@@ -59,7 +59,36 @@ case "$cmd" in
   mkdir)
     mkdir -p "$(stub_path "$1")"; exit $? ;;
   copy|copyto)
-    src="$1"; dest="$2"
+    files_from=""
+    args=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --files-from) files_from="$2"; shift 2 ;;
+        --transfers=*|--checkers=*|--fast-list|--ignore-existing) shift ;;
+        -*) shift ;;
+        *) args+=("$1"); shift ;;
+      esac
+    done
+    src="${args[0]}"; dest="${args[1]}"
+    
+    if [ -n "$files_from" ]; then
+      while IFS= read -r file; do
+         [ -z "$file" ] && continue
+         lp=$(stub_path "$dest/$file")
+         mkdir -p "$(dirname "$lp")"
+         remote="${dest%%:*}"
+         used=$(du -sb "$CLOUD_ROOT/$remote" 2>/dev/null | cut -f1); used=${used:-0}
+         total=$(cat "$CLOUD_ROOT/$remote.quota" 2>/dev/null || echo 10737418240)
+         add=$(stat -c%s "$src/$file")
+         if [ $(( used + add )) -gt $total ]; then
+           echo "rclone-stub: insufficient quota on $remote ($used + $add > $total)" >&2
+           exit 1
+         fi
+         cp -f "$src/$file" "$lp"
+      done < "$files_from"
+      exit 0
+    fi
+    
     if [[ "$src" == *:* && "$dest" != *:* ]]; then
       # remote -> local (restore)
       srcp=$(stub_path "$src")

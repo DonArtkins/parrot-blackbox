@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import streams from 'node:stream/promises';
 import { createWriteStream } from 'node:fs';
-import { copyToFile, mkdirRemote } from './rclone.js';
+import { copyToFile, copyBatch, mkdirRemote } from './rclone.js';
 import { bytesHuman } from '../util/misc.js';
 
 export { bytesHuman };
@@ -69,10 +69,7 @@ export function chooseAccount(needed, accounts) {
 }
 
 /**
- * Place a whole local dir into the pool.
- * @param {string} localDir artifact directory to place
- * @param {object} opts {kind, id, accounts, remoteRoot, chunkSize, onProgress}
- * @returns {Promise<object>} manifest
+ * Place a whole local dir into the pool using two-pass batching for speed.
  */
 export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, chunkSize, onProgress }) {
   if (!accounts || accounts.length === 0) {
@@ -105,57 +102,84 @@ export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, c
     if (typeof onProgress === 'function') onProgress({ done, total: files.length, text });
   };
 
-  let placed = 0;
+  // PASS 1: Planning
+  report(0, 'planning allocations...');
+  const batches = new Map(); // account.remote -> array of relative paths
+  const splits = []; // files that need splitting
+
+  for (const acc of pool) {
+    batches.set(acc.remote, { acc, files: [] });
+  }
+
   for (const entry of entries) {
     if (entry.isDir) {
       const acc = chooseAccount(0, pool);
       if (!acc) throw outOfSpace();
-      const rp = `${basePath}/${entry.rel}`;
-      const res = await mkdirRemote(`${acc.remote}:${rp}`);
-      if (!res.ok) throw new Error(`mkdir failed on ${acc.remote}: ${res.error}`);
-      manifest.entries.push({ rel: entry.rel, type: 'dir', size: 0, loc: [{ remote: acc.remote, path: rp }] });
+      manifest.entries.push({ rel: entry.rel, type: 'dir', size: 0, loc: [{ remote: acc.remote, path: `${basePath}/${entry.rel}` }] });
       continue;
     }
 
-    const rel = entry.rel;
-    const destPath = `${basePath}/${rel}`;
     const freeMax = Math.max(0, ...pool.map((a) => a.free));
     if (entry.size <= freeMax) {
       const acc = chooseAccount(entry.size, pool);
-      if (!acc) { report(placed, `no space for ${rel}`); throw outOfSpace(); }
-      const res = await copyToFile(entry.abs, `${acc.remote}:${destPath}`);
-      if (!res.ok) throw new Error(`upload failed for ${rel} on ${acc.remote}: ${res.error}`);
+      if (!acc) throw outOfSpace();
       consume(acc, entry.size);
+      batches.get(acc.remote).files.push(entry.rel);
       manifest.entries.push({
-        rel,
+        rel: entry.rel,
         type: 'file',
         size: entry.size,
-        loc: [{ remote: acc.remote, path: destPath, start: 0, end: entry.size, size: entry.size }],
+        loc: [{ remote: acc.remote, path: `${basePath}/${entry.rel}`, start: 0, end: entry.size, size: entry.size }],
       });
     } else {
-      // Split across accounts by byte ranges.
-      const locs = [];
-      let start = 0;
-      let partIndex = 0;
-      while (start < entry.size) {
-        const len = Math.min(chunkSize, entry.size - start);
-        const acc = chooseAccount(len, pool);
-        if (process.env.PBB_DEBUG_ALLOC === '1') {
-          console.error(`[alloc] file=${entry.rel} size=${entry.size} start=${start} len=${len} pool=${pool.map((a) => `${a.remote}:free=${a.free}`).join(',')} acc=${acc ? acc.remote : 'NONE'}`);
-        }
-        if (!acc) { report(placed, `no space for part of ${rel}`); throw outOfSpace(); }
-        const partAbs = await makePartFile(entry, start, len);
-        const partPath = `${destPath}.part-${String(partIndex).padStart(4, '0')}`;
-        const res = await copyToFile(partAbs, `${acc.remote}:${partPath}`);
-        if (!res.ok) throw new Error(`upload failed for ${rel} part on ${acc.remote}: ${res.error}`);
-        consume(acc, len);
-        locs.push({ remote: acc.remote, path: partPath, start, end: start + len, size: len });
-        start += len;
-        partIndex += 1;
-      }
-      manifest.entries.push({ rel, type: 'file', size: entry.size, split: true, loc: locs });
-      report(placed, `split ${rel} across ${locs.length} account(s)`);
+      splits.push(entry);
     }
+  }
+
+  // PASS 2: Batch Uploading (Sequential accounts, but parallel files inside rclone)
+  const batchDir = process.env.PBB_STATE_DIR || '/tmp';
+  let placed = 0;
+  
+  for (const [remote, batch] of batches.entries()) {
+    if (batch.files.length === 0) continue;
+    const batchPath = path.join(batchDir, `batch-${remote.replace(/[^a-z0-9]/gi, '_')}-${Date.now()}.txt`);
+    fs.writeFileSync(batchPath, batch.files.join('\n') + '\n');
+    
+    report(placed, `uploading batch of ${batch.files.length} files to ${remote}...`);
+    const res = await copyBatch(localDir, `${remote}:${basePath}`, batchPath);
+    if (!res.ok) throw new Error(`batch upload failed to ${remote}: ${res.error}`);
+    
+    fs.unlinkSync(batchPath);
+    placed += batch.files.length;
+    report(placed, `placed ${placed}/${files.length}`);
+  }
+
+  // PASS 3: Split large files
+  for (const entry of splits) {
+    const rel = entry.rel;
+    const destPath = `${basePath}/${rel}`;
+    const locs = [];
+    let start = 0;
+    let partIndex = 0;
+    
+    report(placed, `splitting huge file ${rel}...`);
+    while (start < entry.size) {
+      const len = Math.min(chunkSize, entry.size - start);
+      const acc = chooseAccount(len, pool);
+      if (!acc) throw outOfSpace();
+      
+      const partAbs = await makePartFile(entry, start, len);
+      const partPath = `${destPath}.part-${String(partIndex).padStart(4, '0')}`;
+      
+      const res = await copyToFile(partAbs, `${acc.remote}:${partPath}`);
+      if (!res.ok) throw new Error(`upload failed for ${rel} part on ${acc.remote}: ${res.error}`);
+      
+      consume(acc, len);
+      locs.push({ remote: acc.remote, path: partPath, start, end: start + len, size: len });
+      start += len;
+      partIndex += 1;
+    }
+    manifest.entries.push({ rel, type: 'file', size: entry.size, split: true, loc: locs });
     placed += 1;
     report(placed, `placed ${placed}/${files.length}`);
   }

@@ -71,6 +71,19 @@ export async function copyToFile(localFile, remotePath, { ignoreExisting = false
   return { ok: res.exitCode === 0, exitCode: res.exitCode, error: res.stderr?.trim() };
 }
 
+/** Copy a batch of files using --files-from. */
+export async function copyBatch(localDir, remotePath, filesFromPath) {
+  const args = [
+    'copy', localDir, remotePath,
+    '--files-from', filesFromPath,
+    '--transfers=16',
+    '--checkers=16',
+    '--fast-list'
+  ];
+  const res = await rejectFalse(args);
+  return { ok: res.exitCode === 0, exitCode: res.exitCode, error: res.stderr?.trim() };
+}
+
 /** Create a remote directory. */
 export async function mkdirRemote(remotePath) {
   const res = await rejectFalse(['mkdir', remotePath]);

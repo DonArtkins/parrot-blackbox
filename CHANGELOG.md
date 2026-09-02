@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - **BTRFS snapshot upload EACCES permissions error** — `fs.readdirSync` failed when scanning root-owned files (like `/etc/credstore`) inside the Timeshift BTRFS mount. The upload logic is now run through an internal privileged helper (`sudo -E node ... _internal_upload`), allowing full traversal and chunking of BTRFS files while preserving the exact interactive sudo password prompt behavior used in other tools (e.g. gitswitch).
 
+### Changed
+- **Massively faster snapshot uploads (batch mode)** — Replaced the sequential file-by-file upload loop (one `rclone copyto` per file, ~474k process spawns for a full system snapshot) with a two-pass batched architecture: files are pre-allocated to accounts in-memory, then uploaded using `rclone copy --files-from` with `--transfers=16 --checkers=16` for internal parallelism. Expected ~8–12× speedup (20+ hours → 1–3 hours).
+
 ## [1.0.10] - 2026-09-02
 
 ### Fixed
