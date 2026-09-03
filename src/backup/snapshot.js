@@ -158,6 +158,8 @@ export async function deleteSnapshot(name, { privileged = 'noninteractive' } = {
   if (privileged === 'interactive') {
     await ensureSudo();
     const res = await sudoInteractive(args);
+    // Timeshift exits 0 even when the qgroup destroy fails, so we verify the
+    // snapshot is actually gone rather than trusting the exit code alone.
     if (res.exitCode !== 0) throw new Error(`timeshift --delete ${name} failed (exit ${res.exitCode})`);
     return true;
   }
@@ -169,16 +171,32 @@ export async function deleteSnapshot(name, { privileged = 'noninteractive' } = {
   return true;
 }
 
+/** Run btrfs quota rescan -w / and wait for it to finish. */
+async function btrfsQuotaRescan({ privileged = 'interactive', onProgress } = {}) {
+  onProgress?.('Running btrfs quota rescan — this may take a moment…');
+  const res = privileged === 'interactive'
+    ? await sudoInteractive(['btrfs', 'quota', 'rescan', '-w', '/'])
+    : await sudoNonInteractive(['btrfs', 'quota', 'rescan', '-w', '/']);
+  if (res.exitCode !== 0) {
+    onProgress?.(`⚠ btrfs quota rescan exited ${res.exitCode} — quotas may not be enabled, continuing`);
+  } else {
+    onProgress?.('✔ btrfs quota rescan complete');
+  }
+}
+
 /**
  * Delete ALL local Timeshift snapshots.
  *
- * Runs `sudo btrfs quota rescan -w /` first to re-sync qgroup accounting —
- * without this, a stale qgroup entry can cause `timeshift --delete` to fail
- * with "Failed to destroy qgroup" even though the subvolume itself was removed.
- *
- * After the rescan, each snapshot is deleted in a loop.  If a delete still
- * fails the function records the error and carries on so the rest can be
- * cleaned up; it throws at the end if any deletions failed.
+ * Strategy (matches the confirmed-working pattern from research):
+ * 1. Run `btrfs quota rescan -w /` upfront.
+ * 2. For each snapshot: attempt delete, then verify it is GONE from
+ *    `timeshift --list`. Timeshift exits 0 even when it prints
+ *    "E: Failed to remove snapshot" (qgroup destroy fails silently).
+ *    Verification catches that.
+ * 3. If a snapshot is still present after the first attempt:
+ *    run another rescan (the delete itself may have left a new stale entry)
+ *    and retry exactly once.
+ * 4. If it still persists after retry, record it as failed and move on.
  *
  * @param {object} opts
  * @param {'interactive'|'noninteractive'} opts.privileged
@@ -188,40 +206,53 @@ export async function deleteSnapshot(name, { privileged = 'noninteractive' } = {
 export async function deleteAllSnapshots({ privileged = 'interactive', onProgress } = {}) {
   if (privileged === 'interactive') await ensureSudo();
 
-  // Step 1: rescan qgroups so stale entries don't block the deletes.
-  onProgress?.('Running btrfs quota rescan — this may take a moment…');
-  const rescanRes = privileged === 'interactive'
-    ? await sudoInteractive(['btrfs', 'quota', 'rescan', '-w', '/'])
-    : await sudoNonInteractive(['btrfs', 'quota', 'rescan', '-w', '/']);
+  // Step 1: initial rescan to clear stale qgroup entries.
+  await btrfsQuotaRescan({ privileged, onProgress });
 
-  // A non-zero exit here is not fatal — it just means quotas may not be enabled
-  // (e.g. rsync-mode Timeshift).  Log and continue.
-  if (rescanRes.exitCode !== 0) {
-    onProgress?.(`⚠ btrfs quota rescan exited ${rescanRes.exitCode} — continuing anyway`);
-  } else {
-    onProgress?.('✔ btrfs quota rescan complete');
-  }
-
-  // Step 2: list, then delete each snapshot.
+  // Step 2: delete each snapshot, verifying it's actually gone.
   const snapshots = await listLocalSnapshots({ privileged });
   const deleted = [];
   const failed = [];
 
   for (const sn of snapshots) {
     onProgress?.(`Deleting snapshot: ${sn.name}`);
-    try {
-      await deleteSnapshot(sn.name, { privileged });
+    let success = false;
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await deleteSnapshot(sn.name, { privileged });
+      } catch {
+        // Timeshift may have removed the subvolume but still exit non-zero.
+        // Fall through to the verify step.
+      }
+
+      // Verify the snapshot is actually gone from timeshift --list.
+      const remaining = await listLocalSnapshots({ privileged });
+      const stillPresent = remaining.some((s) => s.name === sn.name);
+
+      if (!stillPresent) {
+        success = true;
+        break;
+      }
+
+      if (attempt === 1) {
+        // The delete left a new stale qgroup entry — rescan and retry once.
+        onProgress?.(`  ⚠ ${sn.name} still present after delete — rescanning qgroups and retrying…`);
+        await btrfsQuotaRescan({ privileged, onProgress });
+      }
+    }
+
+    if (success) {
       deleted.push(sn.name);
-    } catch (e) {
-      // qgroup bookkeeping might still fail on the first pass — caller can retry.
-      failed.push({ name: sn.name, error: e.message });
-      onProgress?.(`  ✖ ${sn.name}: ${e.message}`);
+    } else {
+      failed.push({ name: sn.name, error: 'still present after 2 attempts + qgroup rescan' });
+      onProgress?.(`  ✖ ${sn.name}: could not delete after rescan — try deleting it individually`);
     }
   }
 
   if (failed.length > 0) {
     throw Object.assign(
-      new Error(`${failed.length} snapshot(s) could not be deleted — try running again after a fresh qgroup rescan`),
+      new Error(`${failed.length} snapshot(s) could not be deleted`),
       { deleted, failed },
     );
   }

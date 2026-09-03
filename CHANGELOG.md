@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.4] - 2026-09-03
+
+### Fixed
+- **Delete ALL snapshots actually works now.** Timeshift exits 0 even when it prints `E: Failed to destroy qgroup / E: Failed to remove snapshot` — the previous code trusted the exit code and reported success while the snapshots remained. The fix:
+  - After each `timeshift --delete`, verify the snapshot is actually gone by re-running `timeshift --list`.
+  - If it's still present, run a second `btrfs quota rescan -w /` (the delete itself creates a new stale qgroup entry) and retry once.
+  - Only mark as deleted once absence is confirmed. Only mark as failed if it persists after both attempts.
+  - Extracted `btrfsQuotaRescan()` helper used for both the upfront rescan and the mid-loop retry.
+
 ## [2.0.3] - 2026-09-03
 
 ### Added
