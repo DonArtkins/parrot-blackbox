@@ -18,7 +18,7 @@ const GiB = 1024 ** 3;
 /** Factory defaults — safe, conservative, self-documenting. */
 export function defaultConfig() {
   return {
-    version: 1,
+    version: 2,
     jobs: {
       // The weekly snapshot is THE default backup. Daily file backups are an
       // OPT-IN (enabled:true) so cloud + local storage are respected by default
@@ -45,11 +45,19 @@ export function defaultConfig() {
         keep: 3, // latest + 2 previous (the middle one is the sanity safety net)
         catchUpLimit: 3,
         chunkSize: 2 * GiB,
+        btrfs: {
+          enabled: true, // Use BTRFS send/receive for incremental backups
+          incremental: true, // false = always do full send (no parent)
+          compression: true, // Use zstd compression in the pipeline
+          encryption: false, // Use openssl encryption (requires passphrase)
+          excludeSubvolumes: ['@swap'], // Subvolumes to skip (swap is meaningless to restore)
+        },
       },
     },
     storage: {
       remoteRoot: 'parrot-blackbox',
       chunkSize: 2 * GiB,
+      encryptionPassphrase: '', // For BTRFS stream encryption; leave empty to prompt on first encrypted backup
       providers: {
         mega: { defaultQuotaGiB: 20 },
         gdrive: { defaultQuotaGiB: 15 },

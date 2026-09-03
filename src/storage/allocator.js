@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import streams from 'node:stream/promises';
 import { createWriteStream } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { copyToFile, copyBatch, mkdirRemote } from './rclone.js';
 import { bytesHuman } from '../util/misc.js';
 
@@ -237,4 +238,109 @@ async function makePartFile(file, start, len) {
   fs.mkdirSync(path.dirname(partAbs), { recursive: true });
   await streams.pipeline(fs.createReadStream(file.abs, { start, end: start + len - 1 }), createWriteStream(partAbs));
   return partAbs;
+}
+
+export async function planAndPlaceStream(btrfsStream, { kind, id, accounts, remoteRoot, chunkSize, onProgress, originalSize }) {
+  if (!accounts || accounts.length === 0) {
+    throw new Error('no storage accounts configured');
+  }
+  chunkSize = chunkSize || 2 * (1024 ** 3);
+
+  const pool = accounts.map((a) => ({ ...a }));
+  const consume = (account, bytes) => {
+    const a = pool.find((x) => x.id === account.id);
+    if (a) a.free -= bytes;
+  };
+
+  const basePath = `${remoteRoot}/${kind}/${id}`;
+  let partIndex = 0;
+
+  const getNextAccountAndPath = () => {
+    const acc = chooseAccount(chunkSize, pool);
+    if (!acc) throw new Error('OUT OF SPACE — the pool has no account with enough free room.');
+    consume(acc, chunkSize); // Optimistically consume chunkSize
+    const partPath = `${basePath}/btrfs.stream.part-${String(partIndex++).padStart(4, '0')}`;
+    return { remote: acc.remote, path: partPath, account: acc };
+  };
+
+  let currentChild = null;
+  let currentBytesInChunk = 0;
+  let totalBytes = 0;
+  let locs = [];
+  let currentStart = 0;
+  let target = getNextAccountAndPath();
+  
+  currentChild = spawn(process.env.PBB_RCLONE || 'rclone', ['rcat', `${target.remote}:${target.path}`]);
+  let childFailed = false;
+  currentChild.on('error', () => { childFailed = true; });
+  currentChild.on('exit', (code) => { if (code !== 0) childFailed = true; });
+
+  for await (const chunk of btrfsStream) {
+    if (childFailed) throw new Error(`rclone rcat failed on ${target.remote}`);
+    let offset = 0;
+    while (offset < chunk.length) {
+      const remainingInChunk = chunkSize - currentBytesInChunk;
+      const toWrite = Math.min(chunk.length - offset, remainingInChunk);
+      
+      const piece = chunk.subarray(offset, offset + toWrite);
+      const canContinue = currentChild.stdin.write(piece);
+      
+      currentBytesInChunk += toWrite;
+      totalBytes += toWrite;
+      offset += toWrite;
+      
+      if (!canContinue) {
+        await new Promise((res) => currentChild.stdin.once('drain', res));
+      }
+      
+      if (currentBytesInChunk >= chunkSize) {
+        currentChild.stdin.end();
+        await new Promise((res) => currentChild.once('close', res));
+        if (childFailed) throw new Error(`rclone rcat failed on ${target.remote}`);
+        
+        locs.push({ remote: target.remote, path: target.path, start: currentStart, end: totalBytes, size: currentBytesInChunk });
+        
+        currentStart = totalBytes;
+        currentBytesInChunk = 0;
+        
+        target = getNextAccountAndPath();
+        currentChild = spawn(process.env.PBB_RCLONE || 'rclone', ['rcat', `${target.remote}:${target.path}`]);
+        currentChild.on('error', () => { childFailed = true; });
+        currentChild.on('exit', (code) => { if (code !== 0) childFailed = true; });
+      }
+    }
+    if (onProgress) onProgress({ done: totalBytes, total: originalSize, text: `uploading stream: ${(totalBytes / (1024**2)).toFixed(1)} MB` });
+  }
+  
+  if (currentChild) {
+    currentChild.stdin.end();
+    await new Promise((res) => currentChild.once('close', res));
+    if (childFailed) throw new Error(`rclone rcat failed on ${target.remote}`);
+    if (currentBytesInChunk > 0) {
+      locs.push({ remote: target.remote, path: target.path, start: currentStart, end: totalBytes, size: currentBytesInChunk });
+    }
+  }
+
+  const manifest = {
+    schema: 2,
+    kind,
+    id,
+    createdAt: new Date().toISOString(),
+    totalSize: totalBytes,
+    originalSize: originalSize || 0,
+    remoteRoot,
+    entries: [{ rel: 'btrfs.stream', type: 'file', size: totalBytes, split: true, loc: locs }],
+  };
+
+  // Manifest: cloud + local mirror.
+  const manifestLocalDir = process.env.PBB_MANIFESTS_DIR || path.join(process.env.PBB_STATE_DIR || '.', 'manifests');
+  const manifestLocalPath = path.join(manifestLocalDir, `${kind}-${id}.json`);
+  fs.mkdirSync(manifestLocalDir, { recursive: true });
+  fs.writeFileSync(manifestLocalPath, JSON.stringify(manifest, null, 2));
+  const accForManifest = pool.find((a) => a.free > 0) || pool[0];
+  if (accForManifest) {
+    const res = await copyToFile(manifestLocalPath, `${accForManifest.remote}:${basePath}/${MANIFEST_NAME}`);
+    if (res.ok) manifest.account = accForManifest.remote;
+  }
+  return manifest;
 }

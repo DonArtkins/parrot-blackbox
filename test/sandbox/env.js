@@ -40,6 +40,7 @@ export function setupSandbox(name) {
     PBB_SANDBOX_CLOUD: cloud,
     PBB_SANDBOX_LOG: log,
     PBB_SUDO_DIRECT: '1',
+    PBB_DISABLE_BTRFS: '1',  // Disable BTRFS mode in tests (sandboxes use regular dirs, not BTRFS subvolumes)
     PATH: `${path.join(PKG_ROOT, 'test', 'sandbox', 'stubs')}:${process.env.PATH}`,
   };
   return { root, home, cloud, timeshift, state, log, env };

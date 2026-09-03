@@ -254,36 +254,71 @@ export function cleanupSnapshotMount(snapshot) {
 /**
  * Run one snapshot generation: create → upload to the pool → prune old ones
  * BOTH locally and in the cloud.
+ * 
+ * V2.0 BTRFS send/receive pipeline:
+ * 1. Check if root is on BTRFS
+ * 2. Create read-only snapshot via Timeshift
+ * 3. Find the most recent fully uploaded snapshot to use as parent (incremental)
+ * 4. Generate BTRFS send stream (full or incremental)
+ * 5. Pipe through zstd compression + optional encryption
+ * 6. Stream directly to cloud via rclone rcat (chunked across accounts)
+ * 7. Save manifest with parent chain tracking
+ * 
  * Assumes the caller holds the scheduler lock.
  */
 export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninteractive', onProgress } = {}) {
-  journal('snapshots', `start due=${due} privileged=${privileged}`);
+  journal('snapshots', `start due=${due} privileged=${privileged} btrfs=${cfg.jobs.snapshots.btrfs?.enabled}`);
   const accounts = await refreshAccounts(cfg);
   
   if (accounts.length === 0) {
     throw new Error('no storage accounts configured — add one with `parrot-blackbox account add`');
   }
 
+  const btrfsCfg = cfg.jobs.snapshots.btrfs || {};
+  let useBtrfs = btrfsCfg.enabled !== false && !process.env.PBB_DISABLE_BTRFS;
+
+  // Check for BTRFS if enabled
+  if (useBtrfs) {
+    const { hasBtrfs, isBtrfsFilesystem } = await import('./btrfs-send.js');
+    if (!hasBtrfs()) {
+      console.log('⚠ BTRFS tools not found — falling back to file-copy mode');
+      useBtrfs = false;
+    } else {
+      const isBtrfs = await isBtrfsFilesystem('/');
+      if (!isBtrfs) {
+        console.log('⚠ Root filesystem is not BTRFS — falling back to file-copy mode');
+        useBtrfs = false;
+      }
+    }
+  }
+
   let created = null;
   const localSnaps = await listLocalSnapshots({ privileged });
   
-  // Look at snapshots from newest to oldest; find the most recent one that
-  // belongs to parrot-blackbox and has not been fully uploaded yet.
+  // Find the most recent fully uploaded snapshot to use as parent for incremental send
+  let parentSnap = null;
+  if (useBtrfs && btrfsCfg.incremental !== false) {
+    const { findLastUploadedSnapshot } = await import('./btrfs-send.js');
+    const parentName = findLastUploadedSnapshot(manifestsDir(), localSnaps);
+    if (parentName) {
+      parentSnap = localSnaps.find(s => s.name === parentName);
+      if (parentSnap) {
+        journal('snapshots', `found parent snapshot ${parentName} for incremental send`);
+        console.log(`\n📊 Using incremental backup (parent: ${parentName})`);
+      }
+    }
+  }
+  
+  // Check for incomplete uploads to resume
   for (let i = localSnaps.length - 1; i >= 0; i--) {
     const s = localSnaps[i];
     if (s.tags.includes('W') || (s.line && s.line.includes('parrot-blackbox'))) {
-      // Check for the manifest FILE on disk — this is the authoritative source.
-      // state.manifests (the in-memory JSON blob) may be empty on the first run
-      // or after a reinstall, so we cannot rely on it alone.
       const manifestFile = path.join(manifestsDir(), `snapshots-${s.name}.json`);
       const isUploaded = fs.existsSync(manifestFile);
-      if (!isUploaded) {
+      if (!isUploaded && !created) {
         created = s;
         journal('snapshots', `resuming upload for incomplete snapshot ${s.name}`);
-        console.log(`\n⏳ Resuming incomplete upload for snapshot ${s.name} (from tracker)...`);
-        break;
-      } else {
-        // The most recent parrot-blackbox snapshot is fully uploaded — create a new one.
+        console.log(`\n⏳ Resuming incomplete upload for snapshot ${s.name}...`);
         break;
       }
     }
@@ -291,48 +326,52 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
 
   if (!created) {
     created = await createSnapshot({ comment: `parrot-blackbox ${due}`, privileged });
+    console.log(`\n✓ Created snapshot ${created.name}`);
   }
 
   const dir = snapshotDirFor(created, { privileged });
+  const parentDir = parentSnap ? snapshotDirFor(parentSnap, { privileged }) : null;
 
   let manifest;
   try {
-    const bin = process.argv[1] || 'parrot-blackbox';
-    const outPath = path.join(stateDir(), `manifest-${created.name}.json`);
-    const envVars = {
-      HOME: process.env.HOME,
-      PBB_STATE_DIR: stateDir(),
-      PBB_CONFIG_FILE: configFile()
-    };
-    const cmdArgs = [process.execPath, bin, '_internal_upload', dir, 'snapshots', created.name, cfg.storage.remoteRoot, String(cfg.storage.chunkSize), outPath];
-    const args = process.env.PBB_SUDO_DIRECT === '1' ? cmdArgs : ['-E', ...cmdArgs];
-    
-    let res;
-    if (privileged === 'interactive') {
-      await ensureSudo();
-      res = await sudoInteractive(args, { env: envVars });
+    if (useBtrfs) {
+      // V2 BTRFS send/receive path
+      manifest = await uploadViaBtrfsSend({
+        snapshot: created,
+        snapshotDir: dir,
+        parentSnapshot: parentSnap,
+        parentDir,
+        accounts,
+        cfg,
+        due,
+        privileged,
+        onProgress,
+      });
     } else {
-      res = await sudoNonInteractive(args, { env: envVars });
+      // Legacy file-copy fallback (v2 behavior)
+      manifest = await uploadViaFileCopy({
+        snapshot: created,
+        snapshotDir: dir,
+        parentDir,
+        accounts,
+        cfg,
+        due,
+        privileged,
+        onProgress,
+      });
     }
-    
-    if (res.exitCode !== 0) {
-      throw new Error(`upload failed (exit ${res.exitCode})`);
-    }
-    
-    const manifestStr = fs.readFileSync(outPath, 'utf8');
-    manifest = JSON.parse(manifestStr);
-    try { fs.rmSync(outPath, {force: true}); } catch {}
   } catch (e) {
     // The local snapshot exists and is safe; the cloud upload failed.
     journal('snapshots', `upload failed for ${created.name}: ${e.message}`, 'error');
-    cleanupSnapshotMount(created);  // Clean up any temporary BTRFS mount
+    cleanupSnapshotMount(created);
     throw e;
   } finally {
-    // Always cleanup the temporary mount after upload attempt
     cleanupSnapshotMount(created);
   }
+
   manifest.due = due;
   manifest.snapshot = created.name;
+  manifest.parent = parentSnap?.name || null;
 
   // Prune OLD snapshots — local + cloud in the same pass.
   const pruned = await pruneSnapshots(cfg, accounts, { privileged });
@@ -348,17 +387,137 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
     kind: 'snapshots',
     id: created.name,
     due,
+    parent: manifest.parent,
     createdAt: manifest.createdAt,
     totalSize: manifest.totalSize,
+    originalSize: manifest.originalSize,
   };
   saveState(state);
-  journal('snapshots', `done due=${due} snapshot=${created.name} bytes=${manifest.totalSize}`);
+  journal('snapshots', `done due=${due} snapshot=${created.name} bytes=${manifest.totalSize} parent=${manifest.parent || 'null'}`);
 
   return { due, snapshot: created.name, manifest, pruned };
 }
 
 /**
+ * Upload a snapshot using BTRFS send/receive streaming.
+ * Creates: btrfs send [-p parent] | zstd | [openssl] | rclone rcat (chunked)
+ * 
+ * Note: For BTRFS send to work, we need to use paths that btrfs recognizes as subvolumes.
+ * On most Parrot systems, snapshots are at: /timeshift-btrfs/snapshots/<name>
+ * We construct the proper subvolume path rather than using potentially-mounted paths.
+ */
+async function uploadViaBtrfsSend({ snapshot, snapshotDir, parentSnapshot, parentDir, accounts, cfg, due, privileged, onProgress }) {
+  const { createSendStream, estimateSendSize } = await import('./btrfs-send.js');
+  const { planAndPlaceStream } = await import('../storage/allocator.js');
+  
+  // Construct the actual subvolume path for BTRFS send
+  // Timeshift stores snapshots at /timeshift-btrfs/snapshots/<name> on the root BTRFS volume
+  // We need to use this path for btrfs send, not any temporarily mounted paths
+  const subvolPath = `/timeshift-btrfs/snapshots/${snapshot.name}`;
+  const parentSubvolPath = parentSnapshot ? `/timeshift-btrfs/snapshots/${parentSnapshot.name}` : null;
+  
+  journal('snapshots', `using subvolume path: ${subvolPath}`);
+  
+  // Estimate size for progress reporting (use original snapshotDir for filesystem operations)
+  const estimatedSize = await estimateSendSize(snapshotDir, { parent: parentDir });
+  const btrfsCfg = cfg.jobs.snapshots.btrfs || {};
+  
+  console.log(`\n📤 Uploading ${parentDir ? 'incremental' : 'full'} BTRFS stream...`);
+  console.log(`   Estimated size: ${(estimatedSize / (1024 ** 3)).toFixed(2)} GiB`);
+  if (btrfsCfg.compression) console.log(`   Compression: zstd enabled`);
+  if (btrfsCfg.encryption && cfg.storage.encryptionPassphrase) console.log(`   Encryption: AES-256 enabled`);
+
+  // Create the BTRFS send stream using the actual subvolume paths
+  const sendStream = await createSendStream(subvolPath, { parent: parentSubvolPath, privileged });
+
+  // Build the pipeline: btrfs send -> [zstd] -> [openssl] -> chunked rclone rcat
+  const { spawn } = await import('node:child_process');
+  const pipeline = [];
+  let currentStream = sendStream;
+
+  // Stage 1: Compression
+  if (btrfsCfg.compression !== false) {
+    const zstd = spawn('zstd', ['-T0', '-c'], { stdio: ['pipe', 'pipe', 'inherit'] });
+    currentStream.pipe(zstd.stdin);
+    pipeline.push(zstd);
+    currentStream = zstd.stdout;
+  }
+
+  // Stage 2: Encryption
+  if (btrfsCfg.encryption && cfg.storage.encryptionPassphrase) {
+    const openssl = spawn('openssl', ['enc', '-e', '-aes256', '-pbkdf2', '-pass', `pass:${cfg.storage.encryptionPassphrase}`], {
+      stdio: ['pipe', 'pipe', 'inherit'],
+    });
+    currentStream.pipe(openssl.stdin);
+    pipeline.push(openssl);
+    currentStream = openssl.stdout;
+  }
+
+  // Stage 3: Stream to cloud via allocator's planAndPlaceStream (handles chunking across accounts)
+  const manifest = await planAndPlaceStream(currentStream, {
+    kind: 'snapshots',
+    id: snapshot.name,
+    accounts,
+    remoteRoot: cfg.storage.remoteRoot,
+    chunkSize: cfg.storage.chunkSize,
+    onProgress,
+    originalSize: estimatedSize,
+  });
+
+  // Wait for all pipeline stages to complete
+  await Promise.all(pipeline.map(proc => new Promise((resolve, reject) => {
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Pipeline stage failed: exit ${code}`)));
+    proc.on('error', reject);
+  })));
+
+  // Save manifest locally
+  const manifestPath = path.join(manifestsDir(), `snapshots-${snapshot.name}.json`);
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+  console.log(`\n✓ Uploaded ${(manifest.totalSize / (1024 ** 3)).toFixed(2)} GiB to cloud`);
+  return manifest;
+}
+
+/**
+ * Legacy file-copy upload (v2 fallback for non-BTRFS systems).
+ */
+async function uploadViaFileCopy({ snapshot, snapshotDir, parentDir, accounts, cfg, due, privileged, onProgress }) {
+  console.log(`\n📤 Uploading snapshot via file copy (legacy mode)...`);
+  
+  const bin = process.argv[1] || 'parrot-blackbox';
+  const outPath = path.join(stateDir(), `manifest-${snapshot.name}.json`);
+  const envVars = {
+    HOME: process.env.HOME,
+    PBB_STATE_DIR: stateDir(),
+    PBB_CONFIG_FILE: configFile(),
+    PBB_PARENT_DIR: parentDir || '',
+  };
+  const cmdArgs = [process.execPath, bin, '_internal_upload', snapshotDir, 'snapshots', snapshot.name, cfg.storage.remoteRoot, String(cfg.storage.chunkSize), outPath];
+  const args = process.env.PBB_SUDO_DIRECT === '1' ? cmdArgs : ['-E', ...cmdArgs];
+  
+  let res;
+  if (privileged === 'interactive') {
+    await ensureSudo();
+    res = await sudoInteractive(args, { env: envVars });
+  } else {
+    res = await sudoNonInteractive(args, { env: envVars });
+  }
+  
+  if (res.exitCode !== 0) {
+    throw new Error(`upload failed (exit ${res.exitCode})`);
+  }
+  
+  const manifestStr = fs.readFileSync(outPath, 'utf8');
+  const manifest = JSON.parse(manifestStr);
+  try { fs.rmSync(outPath, {force: true}); } catch {}
+  
+  return manifest;
+}
+
+/**
  * Enforce the snapshot retention limit across local disk AND cloud.
+ * V2 parent-chain awareness: don't delete a snapshot if it's the parent of a newer one still in the keep window.
  * Returns the list of snapshot names pruned.
  */
 export async function pruneSnapshots(cfg, accounts, { privileged = 'noninteractive' } = {}) {
@@ -369,9 +528,44 @@ export async function pruneSnapshots(cfg, accounts, { privileged = 'noninteracti
   const cloudNames = cloud.map((c) => c.id);
   const union = [...new Set([...localNames, ...cloudNames])];
 
+  // Build parent chain map from manifests
+  const parentMap = new Map(); // snapshot -> parent
+  const manifestDir = manifestsDir();
+  if (fs.existsSync(manifestDir)) {
+    for (const file of fs.readdirSync(manifestDir)) {
+      if (file.startsWith('snapshots-') && file.endsWith('.json')) {
+        try {
+          const manifest = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
+          if (manifest.snapshot && manifest.parent) {
+            parentMap.set(manifest.snapshot, manifest.parent);
+          }
+        } catch {}
+      }
+    }
+  }
+
   const { prune } = planPrune(union, cfg.jobs.snapshots.keep);
+  
+  // Filter out snapshots that are parents of kept snapshots
+  const keptSet = new Set(union.filter(name => !prune.includes(name)));
+  const protectedParents = new Set();
+  for (const kept of keptSet) {
+    let current = kept;
+    while (current) {
+      const parent = parentMap.get(current);
+      if (parent && union.includes(parent)) {
+        protectedParents.add(parent);
+        current = parent;
+      } else {
+        break;
+      }
+    }
+  }
+
+  const safeToPrune = prune.filter(name => !protectedParents.has(name));
   const pruned = [];
-  for (const name of prune) {
+  
+  for (const name of safeToPrune) {
     // Cloud first, then local — if one fails the other still gets cleaned.
     try {
       await removeArtifact('snapshots', name, accounts, cfg.storage.remoteRoot);
@@ -390,6 +584,11 @@ export async function pruneSnapshots(cfg, accounts, { privileged = 'noninteracti
     }
     pruned.push(name);
   }
+  
+  if (protectedParents.size > 0) {
+    journal('snapshots', `protected ${protectedParents.size} parent snapshots from pruning`, 'info');
+  }
+  
   return pruned;
 }
 

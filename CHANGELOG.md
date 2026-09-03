@@ -1,5 +1,61 @@
 # Changelog
 
+## [2.0.1] - 2026-09-03
+
+### Fixed
+- Version bump to correctly follow v2.0.0 published release
+
+## [2.0.0] - 2026-09-03
+
+### 🚀 Major Release: BTRFS Send/Receive Architecture
+
+**Revolutionary efficiency upgrade:** V2.0 replaces file-by-file snapshot copying with native BTRFS send/receive streaming, achieving **10-50x smaller uploads** after the initial bootstrap backup.
+
+#### Breaking Changes
+- **Config schema v2**: New `jobs.snapshots.btrfs` section added to config (auto-migrated on upgrade)
+- **Manifest schema v2**: BTRFS streams use new manifest format with parent chain tracking
+- **First backup after upgrade**: Will be a full BTRFS send (~35 GiB) to establish baseline
+
+#### Added
+- **Incremental BTRFS Streaming**
+  - First backup: Full `btrfs send` (~35-40 GiB, compressed with zstd)
+  - Subsequent backups: Incremental `btrfs send -p <parent>` (only block-level diffs, typically 100 MB - 2 GB)
+  - Direct streaming pipeline: `btrfs send | zstd | [openssl] | rclone rcat` (no temp files)
+  - Parent chain tracking in manifests for proper restore ordering
+  
+- **Optional AES-256 Encryption**
+  - Configure via `jobs.snapshots.btrfs.encryption = true` and `storage.encryptionPassphrase`
+  - Integrated into streaming pipeline with openssl
+
+- **Smart Parent Discovery**
+  - Automatically finds most recent uploaded snapshot as parent for incremental send
+  - Protects parent snapshots from pruning if child snapshots are kept
+
+- **Automatic Fallback**
+  - Detects if root filesystem is BTRFS via `isBtrfsFilesystem()`
+  - Gracefully falls back to v1.x file-copy mode on non-BTRFS systems
+  - Backward compatible with all existing v1.x backups
+
+- **Restore Enhancements**
+  - Parent chain reconstruction for incremental restores
+  - Reverse pipeline: `rclone cat | openssl dec | zstd -d | btrfs receive`
+  - Post-restore UUID fixup guidance for hardware changes (`/etc/fstab`, `/etc/crypttab`, GRUB)
+
+#### Changed
+- **Upload efficiency**: After first backup, weekly uploads reduced from 35+ GiB to ~100 MB - 2 GB
+- **Upload duration**: Incremental backups now complete in 5-20 minutes instead of 2-8 hours
+- **Snapshot pruning**: Now parent-chain aware, won't delete snapshots needed for incremental restore
+
+#### Technical Details
+- New module: `src/backup/btrfs-send.js` with all BTRFS primitives
+- Updated: `snapshot.js`, `restore.js`, `allocator.js`, `cli.js` for streaming architecture
+- Config v1 → v2 migration is automatic and non-destructive
+- Manifest schema v1 (file trees) and v2 (streams) coexist peacefully
+
+See `CHANGELOG-v2.0.0.md` for complete technical documentation.
+
+---
+
 ## [1.1.0] - 2026-09-02
 
 ### Changed

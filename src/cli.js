@@ -519,18 +519,87 @@ const main = defineCommand({
         const remoteRoot = rest[3];
         const chunkSize = parseInt(rest[4], 10);
         const outPath = rest[5];
-        const { planAndPlace } = await import('./storage/allocator.js');
+        const { planAndPlace, planAndPlaceStream } = await import('./storage/allocator.js');
         const s = p.spinner();
-        s.start(`Uploading snapshot ${id}...`);
+        s.start(`Uploading ${kind} ${id}...`);
         const cfg = loadConfig();
         const accs = await refreshAccounts(cfg);
         try {
-          const manifest = await planAndPlace(localDir, { 
-            kind, id, accounts: accs, remoteRoot, chunkSize,
-            onProgress: (prog) => {
-              s.message(prog.text);
+          let manifest;
+          if (kind === 'snapshots') {
+            const btrfsCfg = cfg.jobs.snapshots.btrfs || {};
+            let useBtrfs = btrfsCfg.enabled !== false && !process.env.PBB_DISABLE_BTRFS;
+            
+            if (useBtrfs) {
+              // V2 BTRFS send/receive path
+              const { hasBtrfs, isBtrfsFilesystem } = await import('./backup/btrfs-send.js');
+              const canUseBtrfs = hasBtrfs() && await isBtrfsFilesystem('/');
+              
+              if (canUseBtrfs) {
+                const { spawn } = await import('node:child_process');
+                const parentDir = process.env.PBB_PARENT_DIR;
+                
+                // Build BTRFS send command with sudo
+                const sendArgs = ['sudo', '-n', 'btrfs', 'send'];
+                if (parentDir) {
+                  sendArgs.push('-p', parentDir, localDir);
+                } else {
+                  sendArgs.push(localDir);
+                }
+                
+                const btrfs = spawn(sendArgs[0], sendArgs.slice(1), { stdio: ['ignore', 'pipe', 'inherit'] });
+                let finalStream = btrfs.stdout;
+                const pipeline = [btrfs];
+                
+                // Stage 1: Compression
+                if (btrfsCfg.compression !== false) {
+                  const zstd = spawn('zstd', ['-T0', '-c'], { stdio: ['pipe', 'pipe', 'inherit'] });
+                  finalStream.pipe(zstd.stdin);
+                  pipeline.push(zstd);
+                  finalStream = zstd.stdout;
+                }
+                
+                // Stage 2: Encryption
+                const passphrase = cfg.storage.encryptionPassphrase;
+                if (btrfsCfg.encryption && passphrase) {
+                  const openssl = spawn('openssl', ['enc', '-e', '-aes256', '-pbkdf2', '-pass', `pass:${passphrase}`], {
+                    stdio: ['pipe', 'pipe', 'inherit']
+                  });
+                  finalStream.pipe(openssl.stdin);
+                  pipeline.push(openssl);
+                  finalStream = openssl.stdout;
+                }
+                
+                manifest = await planAndPlaceStream(finalStream, {
+                  kind, id, accounts: accs, remoteRoot, chunkSize,
+                  onProgress: (prog) => s.message(prog.text)
+                });
+                
+                // Wait for pipeline to complete
+                await Promise.all(pipeline.map(proc => new Promise((resolve, reject) => {
+                  proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Pipeline stage failed: exit ${code}`)));
+                  proc.on('error', reject);
+                })));
+              } else {
+                // Fallback to file-copy mode
+                manifest = await planAndPlace(localDir, { 
+                  kind, id, accounts: accs, remoteRoot, chunkSize,
+                  onProgress: (prog) => s.message(prog.text)
+                });
+              }
+            } else {
+              // File-copy mode (v2 fallback)
+              manifest = await planAndPlace(localDir, { 
+                kind, id, accounts: accs, remoteRoot, chunkSize,
+                onProgress: (prog) => s.message(prog.text)
+              });
             }
-          });
+          } else {
+            manifest = await planAndPlace(localDir, { 
+              kind, id, accounts: accs, remoteRoot, chunkSize,
+              onProgress: (prog) => s.message(prog.text)
+            });
+          }
           s.stop('✔ Upload complete');
           import('node:fs').then(fs => fs.writeFileSync(outPath, JSON.stringify(manifest)));
           process.exitCode = 0;
