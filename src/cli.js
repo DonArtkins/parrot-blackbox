@@ -11,7 +11,7 @@ import { runDoctor, runStatus, runUninstallWizard } from './commands/manage.js';
 import { installService, removeService } from './commands/service.js';
 import { runDueJobs } from './daemon/scheduler.js';
 import { startDaemon, stopDaemon, daemonRunning } from './daemon/daemon.js';
-import { runSnapshotNow, listLocalSnapshots, pruneSnapshots } from './backup/snapshot.js';
+import { runSnapshotNow, listLocalSnapshots, pruneSnapshots, deleteSnapshot, deleteAllSnapshots } from './backup/snapshot.js';
 import { restoreSnapshot, restoreFiles } from './backup/restore.js';
 import { listAccounts, addAccount, removeAccount, refreshAccounts, poolSummary } from './storage/accounts.js';
 import { listArtifacts } from './storage/archive.js';
@@ -48,6 +48,7 @@ ${pc.bold('Usage:')}
   parrot-blackbox force               ⭐ Run every enabled backup NOW (default = weekly snapshot)  ${pc.dim('[sudo]')}
   parrot-blackbox snapshot now        Create a weekly snapshot + upload it now  ${pc.dim('[sudo]')}
   parrot-blackbox snapshot list       List local & cloud snapshots
+  parrot-blackbox snapshot delete [<name>|--all]  Delete one or all local snapshots  ${pc.dim('[sudo]')}
   parrot-blackbox snapshot prune      Delete snapshots beyond the keep limit  ${pc.dim('[sudo]')}
   parrot-blackbox list [files]        List cloud file backups
   parrot-blackbox restore             Restore a snapshot or file backup       ${pc.dim('[sudo]')}
@@ -429,7 +430,72 @@ const main = defineCommand({
           }
           return;
         }
-        console.log(pc.yellow('snapshot subcommands: now | list | prune'));
+        // snapshot delete [<name>|--all]
+        if (sub === 'delete' || sub === 'rm' || sub === 'remove') {
+          const target = args[0];
+          const deleteAll = target === '--all' || !target;
+
+          if (deleteAll && !target) {
+            // No name and no --all: list snapshots and bail with usage hint.
+            const local = await listLocalSnapshots({ privileged: 'interactive' }).catch(() => []);
+            if (local.length === 0) {
+              console.log(pc.dim('No local snapshots found.'));
+              return;
+            }
+            console.log(pc.bold('\nLocal snapshots:'));
+            for (const sn of local) console.log(`  - ${pc.cyan(sn.name)}`);
+            console.log(pc.yellow('\nUsage:'));
+            console.log('  parrot-blackbox snapshot delete <name>   — delete one snapshot');
+            console.log('  parrot-blackbox snapshot delete --all     — delete all (runs btrfs quota rescan first)');
+            console.log();
+            return;
+          }
+
+          if (target === '--all') {
+            // Confirm unless stdin is non-interactive.
+            if (process.stdin.isTTY) {
+              const local = await listLocalSnapshots({ privileged: 'interactive' }).catch(() => []);
+              if (local.length === 0) { console.log(pc.dim('No local snapshots found.')); return; }
+              const { confirm } = await import('@clack/prompts');
+              const ok = await confirm({
+                message: pc.red(`Delete ALL ${local.length} local snapshot(s)? This cannot be undone.`),
+                initialValue: false,
+              });
+              const { isCancel } = await import('@clack/prompts');
+              if (isCancel(ok) || !ok) { console.log(pc.dim('Aborted — nothing deleted.')); return; }
+            }
+            console.log(pc.dim('Running btrfs quota rescan first…'));
+            try {
+              const result = await deleteAllSnapshots({
+                privileged: 'interactive',
+                onProgress: (msg) => console.log(pc.dim(`  ${msg}`)),
+              });
+              console.log(pc.green(`✔ Deleted ${result.deleted.length} snapshot(s).`));
+            } catch (e) {
+              if (e.deleted?.length) console.log(pc.green(`✔ Deleted: ${e.deleted.join(', ')}`));
+              if (e.failed?.length) {
+                console.error(pc.red(`✖ Failed: ${e.failed.map((f) => `${f.name} (${f.error})`).join(', ')}`));
+                console.log(pc.dim('  Try running again — qgroup rescan may need a second pass.'));
+                process.exitCode = 1;
+              } else {
+                console.error(pc.red(`✖ ${e.message}`));
+                process.exitCode = 1;
+              }
+            }
+            return;
+          }
+
+          // Delete a single named snapshot.
+          try {
+            await deleteSnapshot(target, { privileged: 'interactive' });
+            console.log(pc.green(`✔ Snapshot ${target} deleted.`));
+          } catch (e) {
+            console.error(pc.red(`✖ ${e.message}`));
+            process.exitCode = 1;
+          }
+          return;
+        }
+        console.log(pc.yellow('snapshot subcommands: now | list | delete [<name>|--all] | prune'));
         return;
       }
 

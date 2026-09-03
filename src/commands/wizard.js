@@ -17,7 +17,7 @@ import { guidedRemoteAdd } from './remote.js';
 import { listAccounts, refreshAccounts, poolSummary, addAccount, removeAccount } from '../storage/accounts.js';
 import { loadConfig, saveConfig } from '../core/store.js';
 import { runDueJobs } from '../daemon/scheduler.js';
-import { runSnapshotNow, listLocalSnapshots } from '../backup/snapshot.js';
+import { runSnapshotNow, listLocalSnapshots, deleteSnapshot, deleteAllSnapshots } from '../backup/snapshot.js';
 import { listArtifacts } from '../storage/archive.js';
 import { restoreFiles, restoreSnapshot } from '../backup/restore.js';
 import { installService, removeService } from './service.js';
@@ -196,6 +196,90 @@ async function listBackupsAction() {
     p.log.message(pc.dim('No accounts configured — add one from the menu.'));
   }
 }
+/**
+ * Interactive snapshot delete menu.
+ * Lists all local snapshots, lets the user pick one to delete or delete all.
+ * Always runs `btrfs quota rescan -w /` before any delete loop.
+ */
+async function deleteSnapshotsMenu() {
+  // Fetch the current list first so we can show it.
+  let snapshots;
+  try {
+    snapshots = await listLocalSnapshots({ privileged: 'interactive' });
+  } catch (e) {
+    p.log.warn(`Could not list snapshots: ${e.message}`);
+    return;
+  }
+
+  if (snapshots.length === 0) {
+    p.log.message(pc.dim('No local snapshots found — nothing to delete.'));
+    return;
+  }
+
+  // Build option list: one entry per snapshot + Delete All + Back.
+  const options = [
+    ...snapshots.map((sn) => ({ value: sn.name, label: `🗑  ${pc.cyan(sn.name)}`, hint: 'delete this snapshot' })),
+    { value: '__all', label: `💣 Delete ALL snapshots  ${pc.dim(`(${snapshots.length} total)`)}`, hint: 'qgroup rescan + full wipe' },
+    { value: '__back', label: '← Back' },
+  ];
+
+  const pick = await p.select({
+    message: '🗑  Delete snapshots — pick one or delete all',
+    options,
+  });
+
+  if (p.isCancel(pick) || pick === '__back') return;
+
+  // ── Delete ALL ─────────────────────────────────────────────────────────────
+  if (pick === '__all') {
+    const confirm = await p.confirm({
+      message: pc.red(`Delete ALL ${snapshots.length} local snapshot(s)? This cannot be undone.`),
+      initialValue: false,
+    });
+    if (p.isCancel(confirm) || !confirm) {
+      p.log.message(pc.dim('Cancelled — nothing was deleted.'));
+      return;
+    }
+
+    p.log.message(pc.dim('Running btrfs quota rescan first…'));
+    try {
+      const result = await deleteAllSnapshots({
+        privileged: 'interactive',
+        onProgress: (msg) => p.log.message(pc.dim(`  ${msg}`)),
+      });
+      p.log.success(`✔ Deleted ${result.deleted.length} snapshot(s).`);
+    } catch (e) {
+      // e.deleted / e.failed are attached by deleteAllSnapshots
+      if (e.deleted?.length) p.log.success(`✔ Deleted: ${e.deleted.join(', ')}`);
+      if (e.failed?.length) {
+        p.log.warn(`✖ Failed: ${e.failed.map((f) => `${f.name} (${f.error})`).join(', ')}`);
+        p.log.message(pc.dim('  Try running again — the qgroup rescan may need a second pass.'));
+      } else {
+        p.log.warn(`✖ ${e.message}`);
+      }
+    }
+    return;
+  }
+
+  // ── Delete ONE ─────────────────────────────────────────────────────────────
+  const confirm = await p.confirm({
+    message: pc.yellow(`Delete snapshot ${pc.bold(pick)}?`),
+    initialValue: false,
+  });
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.message(pc.dim('Cancelled — nothing was deleted.'));
+    return;
+  }
+
+  try {
+    await deleteSnapshot(pick, { privileged: 'interactive' });
+    p.log.success(`✔ Snapshot ${pc.bold(pick)} deleted.`);
+  } catch (e) {
+    p.log.warn(`✖ ${e.message}`);
+    p.log.message(pc.dim('  If you see a qgroup error, try "Delete ALL" which runs btrfs quota rescan first.'));
+  }
+}
+
 /** Restore files or a system snapshot. */
 async function restoreMenu() {
   const accs = listAccounts();
@@ -323,6 +407,7 @@ export async function runWizard() {
         { value: 'backup', label: '💾 Run all backups', hint: 'snapshots + file backups' },
         { value: 'restore', label: '♻️  Restore backup', hint: 'files or system snapshot' },
         { value: 'list', label: '📋 List backups', hint: 'see what\'s saved' },
+        { value: 'delete', label: '🗑  Delete snapshots', hint: 'remove one or all local snapshots' },
         { value: 'add', label: '☁️  Add cloud account', hint: 'MEGA or Google Drive' },
         { value: 'accounts', label: '🗂  Manage storage', hint: 'pool, quotas, accounts' },
         { value: 'setup', label: '🚀 Guided setup', hint: 'first-time configuration' },
@@ -352,6 +437,7 @@ export async function runWizard() {
         case 'resume': await snapshotNowAction(); break;
         case 'backup': await backupNowAction(); break;
         case 'list': await listBackupsAction(); break;
+        case 'delete': await deleteSnapshotsMenu(); break;
         case 'restore': await restoreMenu(); break;
         case 'service': await serviceMenu(); break;
         case 'daemon': await daemonMenu(); break;

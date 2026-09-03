@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.3] - 2026-09-03
+
+### Added
+- **Snapshot delete menu** (`parrot-blackbox` wizard → 🗑 Delete snapshots): lists all local Timeshift snapshots, lets you pick one to delete or choose "Delete ALL". Before the delete-all loop, `sudo btrfs quota rescan -w /` is always run first to fix stale qgroup entries that would otherwise cause "Failed to destroy qgroup" errors. Failed deletes are reported individually; you can retry and they will succeed after the rescan.
+- **`parrot-blackbox snapshot delete [<name>|--all]`** CLI subcommand:
+  - No argument: lists local snapshots and shows usage.
+  - `<name>`: deletes that single snapshot.
+  - `--all`: runs `btrfs quota rescan -w /` then deletes every local snapshot with confirmation (interactive) or immediately (non-interactive with `--yes` coming from stdin).
+
 ## [2.0.2] - 2026-09-03
 
 ### Fixed

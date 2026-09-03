@@ -168,6 +168,66 @@ export async function deleteSnapshot(name, { privileged = 'noninteractive' } = {
   }
   return true;
 }
+
+/**
+ * Delete ALL local Timeshift snapshots.
+ *
+ * Runs `sudo btrfs quota rescan -w /` first to re-sync qgroup accounting —
+ * without this, a stale qgroup entry can cause `timeshift --delete` to fail
+ * with "Failed to destroy qgroup" even though the subvolume itself was removed.
+ *
+ * After the rescan, each snapshot is deleted in a loop.  If a delete still
+ * fails the function records the error and carries on so the rest can be
+ * cleaned up; it throws at the end if any deletions failed.
+ *
+ * @param {object} opts
+ * @param {'interactive'|'noninteractive'} opts.privileged
+ * @param {(msg:string)=>void} opts.onProgress  optional progress callback
+ * @returns {Promise<{deleted:string[], failed:Array<{name:string,error:string}>}>}
+ */
+export async function deleteAllSnapshots({ privileged = 'interactive', onProgress } = {}) {
+  if (privileged === 'interactive') await ensureSudo();
+
+  // Step 1: rescan qgroups so stale entries don't block the deletes.
+  onProgress?.('Running btrfs quota rescan — this may take a moment…');
+  const rescanRes = privileged === 'interactive'
+    ? await sudoInteractive(['btrfs', 'quota', 'rescan', '-w', '/'])
+    : await sudoNonInteractive(['btrfs', 'quota', 'rescan', '-w', '/']);
+
+  // A non-zero exit here is not fatal — it just means quotas may not be enabled
+  // (e.g. rsync-mode Timeshift).  Log and continue.
+  if (rescanRes.exitCode !== 0) {
+    onProgress?.(`⚠ btrfs quota rescan exited ${rescanRes.exitCode} — continuing anyway`);
+  } else {
+    onProgress?.('✔ btrfs quota rescan complete');
+  }
+
+  // Step 2: list, then delete each snapshot.
+  const snapshots = await listLocalSnapshots({ privileged });
+  const deleted = [];
+  const failed = [];
+
+  for (const sn of snapshots) {
+    onProgress?.(`Deleting snapshot: ${sn.name}`);
+    try {
+      await deleteSnapshot(sn.name, { privileged });
+      deleted.push(sn.name);
+    } catch (e) {
+      // qgroup bookkeeping might still fail on the first pass — caller can retry.
+      failed.push({ name: sn.name, error: e.message });
+      onProgress?.(`  ✖ ${sn.name}: ${e.message}`);
+    }
+  }
+
+  if (failed.length > 0) {
+    throw Object.assign(
+      new Error(`${failed.length} snapshot(s) could not be deleted — try running again after a fresh qgroup rescan`),
+      { deleted, failed },
+    );
+  }
+
+  return { deleted, failed };
+}
 /**
  * Resolve the on-disk directory of a snapshot.
  * 
