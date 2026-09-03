@@ -421,7 +421,7 @@ const main = defineCommand({
         if (sub === 'prune') {
           const cfg = loadConfig();
           try {
-            const pruned = await pruneSnapshots(cfg, loadState(), listAccounts(), { privileged: 'interactive' });
+            const pruned = await pruneSnapshots(cfg, listAccounts(), { privileged: 'interactive' });
             if (pruned.length) console.log(pc.green(`✔ Pruned: ${pruned.join(', ')} (local + cloud).`));
             else console.log(pc.dim('Nothing to prune.'));
           } catch (e) {

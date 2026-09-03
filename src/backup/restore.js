@@ -69,6 +69,10 @@ export async function restoreSnapshot({ id, accounts, cfg, toDir, confirm = fals
     }
   }
 
+  // Let Timeshift mount its own repo — our temporary subvolid=5 mount is no
+  // longer needed and must not linger.
+  await cleanupRestoreMount();
+
   // Run the actual restore (interactive sudo → the password prompt is visible).
   console.log(`\n🔄 Restoring snapshot ${id} over the current system…\n`);
   await ensureSudo();
@@ -150,11 +154,12 @@ async function restoreBtrfsStream({ manifest, snapId, cfg, privileged, onProgres
   }
 
   const btrfsCfg = cfg.jobs.snapshots.btrfs || {};
-  const base = determineSnapshotBase();
-  
-  // Ensure base directory exists
-  await ensureSudo();
-  await sudoInteractive(['mkdir', '-p', base]);
+  const { path: base } = await resolveTimeshiftSnapshotRepo({ privileged });
+  const snapDir = path.join(base, snapId);
+
+  // Ensure the per-snapshot container directory exists (root-owned on real setups).
+  const mk = await runPrivileged(['mkdir', '-p', snapDir], privileged);
+  if (mk.exitCode !== 0) throw new Error(`could not create snapshot dir ${snapDir} (exit ${mk.exitCode})`);
 
   // Build reverse pipeline
   const { spawn } = await import('node:child_process');
@@ -220,12 +225,13 @@ async function restoreBtrfsStream({ manifest, snapId, cfg, privileged, onProgres
     currentStream = zstd.stdout;
   }
 
-  // Stage 4: BTRFS receive
-  console.log(`   💾 Receiving into ${base}...`);
-  const sudoArgs = privileged === 'interactive' 
-    ? ['sudo', '-E', 'btrfs', 'receive', base]
-    : ['sudo', '-n', 'btrfs', 'receive', base];
-  const receive = spawn(sudoArgs[0], sudoArgs.slice(1), {
+  // Stage 4: BTRFS receive — into the per-snapshot container dir so the
+  // received subvolume lands at <snapDir>/@ (Timeshift's BTRFS layout).
+  console.log(`   💾 Receiving into ${snapDir}...`);
+  const recvArgs = process.env.PBB_SUDO_DIRECT === '1'
+    ? ['btrfs', 'receive', snapDir]
+    : ((privileged === 'interactive' ? ['sudo', '-E', 'btrfs', 'receive', snapDir] : ['sudo', '-n', 'btrfs', 'receive', snapDir]));
+  const receive = spawn(recvArgs[0], recvArgs.slice(1), {
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   currentStream.pipe(receive.stdin);
@@ -240,8 +246,130 @@ async function restoreBtrfsStream({ manifest, snapId, cfg, privileged, onProgres
     });
     last.on('error', reject);
   });
-  
+
+  await registerSnapshotWithTimeshift({ snapDir, snapId, privileged });
   journal('restore', `btrfs receive completed for ${snapId}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Timeshift BTRFS repository resolution + snapshot registration       */
+/* ------------------------------------------------------------------ */
+
+let _restoreMountPoint = null;
+
+/** Run a privileged command honoring the interactive/non-interactive mode. */
+async function runPrivileged(args, privileged) {
+  const { sudoExec } = await import('../util/sudo.js');
+  return sudoExec(args, { interactive: privileged === 'interactive' });
+}
+
+/**
+ * Resolve where Timeshift stores BTRFS snapshots on THIS machine.
+ *
+ * On a classic BTRFS install the snapshot repo lives at
+ * `<root-subvolume>/timeshift-btrfs/snapshots`, reachable only after mounting
+ * the top-level subvolume (subvolid=5) — the same shape snapshotDirFor() uses
+ * on the upload side. Static paths cover rsync-mode and sandbox setups.
+ *
+ * @returns {Promise<{path: string, unmount: string|null}>}
+ */
+async function resolveTimeshiftSnapshotRepo({ privileged }) {
+  const staticPaths = [
+    path.join(timeshiftDir(), 'snapshots'),                 // rsync mode & sandbox stub
+    path.join(timeshiftDir(), 'timeshift-btrfs', 'snapshots'),
+    '/run/timeshift/backup/timeshift-btrfs/snapshots',
+  ];
+  for (const p of staticPaths) {
+    if (fs.existsSync(p)) return { path: p, unmount: null };
+  }
+
+  // BTRFS mode: mount the top-level subvolume where Timeshift keeps repos.
+  if (!_restoreMountPoint) {
+    const mountPoint = `/run/parrot-blackbox-restore-${Date.now()}`;
+    const { execaSync } = await import('execa');
+    const findmnt = execaSync('findmnt', ['-n', '-o', 'SOURCE', '/'], { reject: false });
+    const device = findmnt.stdout?.trim().split('[')[0];
+    if (device && findmnt.exitCode === 0) {
+      const mk = await runPrivileged(['mkdir', '-p', mountPoint], privileged);
+      if (mk.exitCode === 0) {
+        const mnt = await runPrivileged(['mount', '-o', 'subvolid=5', device, mountPoint], privileged);
+        if (mnt.exitCode === 0) {
+          const repo = path.join(mountPoint, 'timeshift-btrfs', 'snapshots');
+          if (fs.existsSync(repo)) {
+            _restoreMountPoint = mountPoint;
+            return { path: repo, unmount: mountPoint };
+          }
+          await runPrivileged(['umount', mountPoint], privileged).catch(() => null);
+        }
+        await runPrivileged(['rmdir', mountPoint], privileged).catch(() => null);
+      }
+    }
+  } else {
+    const repo = path.join(_restoreMountPoint, 'timeshift-btrfs', 'snapshots');
+    if (fs.existsSync(repo)) return { path: repo, unmount: null };
+  }
+
+  // Last resort — will produce a clear failure if it's not a real repo path.
+  return { path: path.join(timeshiftDir(), 'snapshots'), unmount: null };
+}
+
+/** Unmount the temporary subvolid=5 mount (best effort), when one was made. */
+export async function cleanupRestoreMount() {
+  const mountPoint = _restoreMountPoint;
+  _restoreMountPoint = null;
+  if (!mountPoint) return;
+  await runPrivileged(['umount', mountPoint], 'interactive').catch(() => null);
+  await runPrivileged(['rmdir', mountPoint], 'interactive').catch(() => null);
+}
+
+/** Parse a Timeshift snapshot name "2026-09-03_12-08-44" into local epoch seconds. */
+export function snapshotEpochFromName(name) {
+  const m = /^(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})$/.exec(String(name || '').trim());
+  if (m) {
+    const t = new Date(`${m[1].replace(/-/g, '/')} ${m[2].replace(/-/g, ':')}`);
+    if (!Number.isNaN(t.getTime())) return Math.floor(t.getTime() / 1000);
+  }
+  return Math.floor(Date.now() / 1000);
+}
+
+/**
+ * Register a freshly received BTRFS subvolume with Timeshift so
+ * `timeshift --list` / `timeshift --restore --snapshot <id>` recognize it.
+ *
+ * Timeshift validates a BTRFS snapshot by the control file `info.json` inside
+ * the container directory and the read-only "@" subvolume — exactly the shape
+ * `btrfs receive <snapDir>` produced.
+ */
+async function registerSnapshotWithTimeshift({ snapDir, snapId, privileged }) {
+  const receivedSubvol = path.join(snapDir, '@');
+  if (!fs.existsSync(receivedSubvol)) {
+    throw new Error(`btrfs receive did not create ${receivedSubvol} — stream name did not match "@"?`);
+  }
+
+  const ctl = {
+    created: String(snapshotEpochFromName(snapId)),
+    'sys-uuid': '',
+    'sys-distro': '',
+    'app-version': '24.06.4',
+    file_count: '0',
+    tags: 'O',
+    comments: 'restored via parrot-blackbox',
+    live: 'false',
+    type: 'btrfs',
+  };
+  const ctlPath = path.join(snapDir, 'info.json');
+  const tmpCtl = path.join(stateDir(), `.ts-info-${snapId}-${process.pid}.json`);
+  fs.writeFileSync(tmpCtl, JSON.stringify(ctl, null, 2) + '\n');
+  try {
+    const cp = await runPrivileged(['cp', tmpCtl, ctlPath], privileged);
+    if (cp.exitCode !== 0) throw new Error(`could not write Timeshift control file (exit ${cp.exitCode})`);
+    await runPrivileged(['chown', 'root:root', ctlPath], privileged).catch(() => null);
+    // Timeshift BTR snapshots are read-only; receive produces writable subvols.
+    await runPrivileged(['btrfs', 'property', 'set', '-ts', receivedSubvol, 'ro', 'true'], privileged).catch(() => null);
+    console.log(`   ✅ Registered snapshot ${snapId} with Timeshift`);
+  } finally {
+    try { fs.rmSync(tmpCtl, { force: true }); } catch { /* best effort */ }
+  }
 }
 
 /** Move a downloaded snapshot tree into the Timeshift snapshot folder (root-owned). */

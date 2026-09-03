@@ -18,13 +18,34 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { execa, execaSync } from 'execa';
 import { hasCommandSync } from '../core/store.js';
-import { sudoExec, sudoExecSync } from '../util/sudo.js';
+import { sudoExec, sudoExecSync, sudoNonInteractive } from '../util/sudo.js';
+
+/**
+ * Minimum size (bytes) a stored BTRFS stream must have to be considered a
+ * real backup. Failed sends still splice a few dozen bytes through the pipe
+ * before exiting 1, and those phantom streams must never be used as an
+ * incremental parent or offered for restore. A real system snapshot stream
+ * is orders of magnitude larger than 1 MiB, so this threshold is safe.
+ */
+export const MIN_VALID_STREAM_BYTES = 1024 * 1024;
 
 /**
  * Check if BTRFS tools are available on the system.
  */
 export function hasBtrfs() {
   return hasCommandSync('btrfs');
+}
+
+/**
+ * Validate a schema-2 snapshot manifest: does it describe a real BTRFS stream
+ * big enough to be an actual backup (not a failed few-byte send)?
+ * @param {object} manifest
+ * @returns {boolean}
+ */
+export function isValidBtrfsStreamManifest(manifest) {
+  if (!manifest || manifest.schema !== 2) return false;
+  const entry = (manifest.entries || []).find((e) => e.rel === 'btrfs.stream');
+  return Boolean(entry && entry.size >= MIN_VALID_STREAM_BYTES && Array.isArray(entry.loc) && entry.loc.length > 0);
 }
 
 /**
@@ -60,13 +81,17 @@ export async function getBtrfsDevice(mountPoint = '/') {
 
 /**
  * Check if a path is actually a BTRFS subvolume (not just a directory on BTRFS).
- * @param {string} path
+ * @param {string} subvolPath
+ * @param {object} opts - {privileged: 'interactive'|'noninteractive'}
  * @returns {Promise<boolean>}
  */
-export async function isSubvolume(path) {
+export async function isSubvolume(subvolPath, { privileged = 'noninteractive' } = {}) {
+  if (!subvolPath || !fs.existsSync(subvolPath)) return false;
   try {
-    // Need sudo to check subvolume info
-    const res = await execa('sudo', ['-n', 'btrfs', 'subvolume', 'show', path], { reject: false });
+    const args = ['btrfs', 'subvolume', 'show', subvolPath];
+    const res = process.env.PBB_SUDO_DIRECT === '1'
+      ? await execa('btrfs', ['subvolume', 'show', subvolPath], { reject: false })
+      : await sudoNonInteractive(args);
     return res.exitCode === 0;
   } catch {
     return false;
@@ -98,28 +123,64 @@ export async function setSubvolumeReadOnly(subvolPath, readOnly = true, { privil
 /**
  * Check if a subvolume is read-only.
  * @param {string} subvolPath
+ * @param {object} opts - {privileged: 'interactive'|'noninteractive'}
  * @returns {Promise<boolean>}
  */
-export async function isSubvolumeReadOnly(subvolPath) {
+export async function isSubvolumeReadOnly(subvolPath, { privileged = 'noninteractive' } = {}) {
   try {
-    const res = await execa('btrfs', ['property', 'get', '-ts', subvolPath, 'ro'], { reject: false });
-    if (res.exitCode !== 0) return false;
-    return res.stdout.includes('ro=true');
+    if (process.env.PBB_SUDO_DIRECT === '1') {
+      const res = await execa('btrfs', ['property', 'get', '-ts', subvolPath, 'ro'], { reject: false });
+      return res.exitCode === 0 && res.stdout.includes('ro=true');
+    }
+    const res = await sudoNonInteractive(['btrfs', 'property', 'get', '-ts', subvolPath, 'ro']);
+    return res.exitCode === 0 && res.stdout.includes('ro=true');
   } catch {
     return false;
   }
 }
 
 /**
+ * Resolve the actual BTRFS subvolume inside a Timeshift snapshot directory.
+ *
+ * Timeshift (BTRFS mode) stores every snapshot as:
+ *   <snapshots>/<name>/@          <- read-only snapshot subvolume of "@"
+ *   <snapshots>/<name>/info.json  <- control file
+ *
+ * Running `btrfs send` on the *container directory* fails with
+ * "failed to get flags for subvolume ... Invalid argument" — the directory is
+ * NOT a subvolume, only the inner "@" is. Some older/exotic layouts put the
+ * snapshot content directly in a subvolume at the container path itself, so
+ * both shapes are resolved here.
+ *
+ * @param {string} snapDir - Snapshot directory (container) already on disk
+ * @param {object} opts - {privileged}
+ * @returns {Promise<string|null>} - The subvolume path to send, or null when
+ *   the snapshot is not backed by a subvolume at all (e.g. Timeshift rsync mode).
+ */
+export async function findSnapshotSubvolume(snapDir, { privileged = 'noninteractive' } = {}) {
+  if (!snapDir || !fs.existsSync(snapDir)) return null;
+  if (await isSubvolume(snapDir, { privileged })) return snapDir;
+  const nested = path.join(snapDir, '@');
+  if (fs.existsSync(nested) && (await isSubvolume(nested, { privileged }))) return nested;
+  return null;
+}
+
+/**
  * Find the most recent successfully uploaded snapshot that can serve as a parent.
  * Looks for manifest files in the local manifests directory.
+ *
+ * A manifest is only trusted when it describes a REAL BTRFS stream: the send
+ * must have completed and uploaded a stream at least MIN_VALID_STREAM_BYTES
+ * in size. Failed sends (e.g. "not a subvolume") leave behind byte-sized
+ * phantom manifests that would otherwise corrupt the incremental chain.
+ *
  * @param {string} manifestsDir - Path to the manifests directory
  * @param {Array<{name:string}>} localSnapshots - List of local snapshots from timeshift
  * @returns {string|null} - The snapshot name to use as parent, or null for full send
  */
 export function findLastUploadedSnapshot(manifestsDir, localSnapshots) {
   if (!fs.existsSync(manifestsDir)) return null;
-  
+
   const manifestFiles = fs.readdirSync(manifestsDir)
     .filter(f => f.startsWith('snapshots-') && f.endsWith('.json'))
     .map(f => {
@@ -129,14 +190,19 @@ export function findLastUploadedSnapshot(manifestsDir, localSnapshots) {
     // Sort by name (which is timestamp-based) descending
     .sort((a, b) => b.name.localeCompare(a.name));
 
-  // Find the most recent manifest whose snapshot still exists locally
-  for (const { name } of manifestFiles) {
+  // Find the most recent valid manifest whose snapshot still exists locally
+  for (const { name, file } of manifestFiles) {
     const existsLocally = localSnapshots.some(s => s.name === name);
-    if (existsLocally) {
-      return name;
+    if (!existsLocally) continue;
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(manifestsDir, file), 'utf8'));
+      if (!isValidBtrfsStreamManifest(manifest)) continue;
+    } catch {
+      continue;
     }
+    return name;
   }
-  
+
   return null;
 }
 
@@ -172,9 +238,9 @@ export async function createSendStream(subvolPath, { parent = null, privileged =
 
   // Spawn via sudo, return the stdout stream and the child process so callers
   // can detect errors (btrfs send exits non-zero when the path is not a subvolume).
-  const sudoArgs = privileged === 'interactive'
-    ? ['sudo', '-E', ...args]
-    : ['sudo', '-n', ...args];
+  const sudoArgs = process.env.PBB_SUDO_DIRECT === '1'
+    ? args
+    : (privileged === 'interactive' ? ['sudo', '-E', ...args] : ['sudo', '-n', ...args]);
 
   const child = spawn(sudoArgs[0], sudoArgs.slice(1), {
     stdio: ['ignore', 'pipe', 'pipe'],

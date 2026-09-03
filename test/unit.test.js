@@ -208,3 +208,73 @@ test('extractCreatedName reads the snapshot name from timeshift --create output'
   assert.equal(extractCreatedName('nothing here'), null);
   assert.equal(extractCreatedName(''), null);
 });
+
+test('BTRFS stream manifests: tiny phantom sends are rejected, real streams accepted', async () => {
+  const { isValidBtrfsStreamManifest, MIN_VALID_STREAM_BYTES } = await import('../src/backup/btrfs-send.js');
+  const phantom = {
+    schema: 2,
+    kind: 'snapshots',
+    id: 'x',
+    entries: [{ rel: 'btrfs.stream', type: 'file', size: 13, split: true, loc: [{ remote: 'm', path: 'p' }] }],
+  };
+  const real = {
+    schema: 2,
+    kind: 'snapshots',
+    id: 'y',
+    entries: [{ rel: 'btrfs.stream', type: 'file', size: MIN_VALID_STREAM_BYTES, split: true, loc: [{ remote: 'm', path: 'p' }] }],
+  };
+  assert.equal(isValidBtrfsStreamManifest(null), false);
+  assert.equal(isValidBtrfsStreamManifest({ schema: 2, entries: [] }), false);
+  assert.equal(isValidBtrfsStreamManifest(phantom), false, '13-byte failed-send manifest is a phantom');
+  assert.equal(isValidBtrfsStreamManifest(real), true, '>= 1 MiB stream is a real backup');
+});
+
+test('findLastUploadedSnapshot ignores phantom manifests and missing local snapshots', async () => {
+  const { findLastUploadedSnapshot, MIN_VALID_STREAM_BYTES } = await import('../src/backup/btrfs-send.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pbb-manifests-'));
+  const write = (name, manifest) => fs.writeFileSync(path.join(dir, `snapshots-${name}.json`), JSON.stringify(manifest));
+
+  const phantom = (name) => ({
+    schema: 2,
+    kind: 'snapshots',
+    id: name,
+    entries: [{ rel: 'btrfs.stream', type: 'file', size: 13, split: true, loc: [{ remote: 'm', path: name }] }],
+  });
+  const real = (name) => ({
+    schema: 2,
+    kind: 'snapshots',
+    id: name,
+    entries: [{ rel: 'btrfs.stream', type: 'file', size: MIN_VALID_STREAM_BYTES, split: true, loc: [{ remote: 'm', path: name }] }],
+  });
+
+  write('2026-09-03_11-15-41', phantom('2026-09-03_11-15-41'));
+  // Not local → must be skipped even if valid.
+  write('2026-09-03_11-53-43', real('2026-09-03_11-53-43'));
+  write('2026-09-03_12-08-44', real('2026-09-03_12-08-44'));
+
+  const locals = [
+    { name: '2026-09-03_11-15-41', tags: 'W' },
+    { name: '2026-09-03_12-08-44', tags: 'W' },
+  ];
+
+  // Newest *valid* + local → current snapshot.
+  assert.equal(findLastUploadedSnapshot(dir, locals), '2026-09-03_12-08-44');
+  // The phantom (2026-09-03_11-15-41) must never be selected even though it is local.
+  const onlyPhantom = [{ name: '2026-09-03_11-15-41', tags: 'W' }];
+  assert.equal(findLastUploadedSnapshot(dir, onlyPhantom), null, 'phantom alone yields null (full send)');
+  assert.equal(findLastUploadedSnapshot('/definitely/not/a/dir', locals), null);
+});
+
+test('snapshotEpochFromName parses Timeshift names and falls back to now', async () => {
+  const { snapshotEpochFromName } = await import('../src/backup/restore.js');
+  const got = snapshotEpochFromName('2026-09-03_12-08-44');
+  const d = new Date(got * 1000);
+  assert.equal(d.getFullYear(), 2026);
+  assert.equal(d.getMonth(), 8); // September (0-based)
+  assert.equal(d.getDate(), 3);
+  assert.equal(d.getHours(), 12);
+  assert.equal(d.getMinutes(), 8);
+  // Garbage falls back to the current time (no crash, no NaN).
+  const fb = snapshotEpochFromName('not-a-snapshot');
+  assert.ok(Number.isFinite(fb) && fb > 1_500_000_000);
+});

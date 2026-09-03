@@ -86,6 +86,20 @@ rclone cat cloud → [decrypt] → zstd decompress → btrfs receive → Timeshi
 - Applies incrementals automatically
 - Reconstructs the exact filesystem byte-for-byte
 
+> **Timeshift layout on BTRFS:** Timeshift (BTRFS mode) stores every snapshot
+> as a *directory* `<snapshots>/<name>/` that contains a read-only `@`
+> subvolume. parrot-blackbox automatically resolves that inner `@` before
+> running `btrfs send` (so uploads never hit the "not a subvolume" error), and
+> on restore it receives each stream back into `<name>/@` plus the `info.json`
+> control file — so `timeshift --restore --snapshot <id>` recognizes the
+> restored backup immediately. If a snapshot is not a subvolume at all
+> (Timeshift rsync mode), the tool falls back to the legacy file-copy method.
+>
+> **No phantom backups:** a failed `btrfs send` (for example a wrong path) used
+> to leave a few-byte "stream" and manifest in the cloud that could corrupt the
+> incremental chain. Only real streams (≥ 1 MiB) are now recorded, and any
+> interrupted upload is removed from the cloud automatically.
+
 ### Why BTRFS send/receive is better
 
 | Old way (v1.x) | New way (v2.0) |

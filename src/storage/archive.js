@@ -14,8 +14,19 @@ import { createWriteStream } from 'node:fs';
 import { execa } from 'execa';
 import { catRemote, lsjson, purge, copyToFile, downloadBatch } from './rclone.js';
 import { MANIFEST_NAME } from './allocator.js';
+import { isValidBtrfsStreamManifest } from '../backup/btrfs-send.js';
 
 export { MANIFEST_NAME };
+
+/**
+ * A schema-2 snapshot manifest whose stream never made it (failed `btrfs send`
+ * leaves a dozens-of-bytes phantom) is garbage: it must not be listed, offered
+ * for restore, or used as an incremental parent. Schema-1 (legacy file-tree)
+ * backups are always kept.
+ */
+function isPhantom(kind, manifest) {
+  return kind === 'snapshots' && manifest.schema === 2 && !isValidBtrfsStreamManifest(manifest);
+}
 
 function manifestMirrorPath(kind, id) {
   const dir = process.env.PBB_MANIFESTS_DIR || path.join(process.env.PBB_STATE_DIR || '.', 'manifests');
@@ -35,7 +46,9 @@ export async function discoverManifest(kind, id, accounts, remoteRoot) {
     if (res.ok) {
       try {
         const manifest = JSON.parse(res.stdout);
-        if (manifest.kind === kind && manifest.id === id) return { account: acc, manifest };
+        if (manifest.kind === kind && manifest.id === id && !isPhantom(kind, manifest)) {
+          return { account: acc, manifest };
+        }
       } catch {
         /* corrupt manifest — skip */
       }
@@ -217,6 +230,7 @@ export async function listArtifacts(kind, accounts, remoteRoot, onProgress) {
           if (!cat.ok) return null;
           try {
             const manifest = JSON.parse(cat.stdout);
+            if (isPhantom(kind, manifest)) return null;
             return { kind, id, createdAt: manifest.createdAt, totalSize: manifest.totalSize, account: acc.remote, manifest };
           } catch {
             return null;

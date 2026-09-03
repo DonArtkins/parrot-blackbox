@@ -1,5 +1,44 @@
 # Changelog
 
+## [2.0.5] - 2026-09-03
+
+### Fixed — BTRFS uploads and restores now work on a real Parrot (BTRFS-in-LUKS) install
+
+- **`btrfs send` failed with `failed to get flags for subvolume …: Invalid argument`**
+  because the tool sent the Timeshift *snapshot container directory* instead of
+  the actual subvolume. Timeshift (BTRFS mode) stores each snapshot as
+  `<snapshots>/<name>/@` — the container is a plain directory. New
+  `findSnapshotSubvolume()` resolves `<snapshot-dir>/@` (and also accepts a
+  layout where the directory itself is a subvolume). Full **and** incremental
+  sends (`-p <parent>/@`) now work, with a clean message instead of a silent
+  failure when the snapshots genuinely aren't subvolumes (Timeshift rsync mode
+  → automatic file-copy fallback, copying the `@` tree).
+- **Phantom 13-byte streams poisoned the incremental chain.** A failed send was
+  still written to the cloud (stream fragment + manifest). Now:
+  - Uploads abort and remove any partial stream + manifest when any pipeline
+    stage fails or the produced stream is under `1 MiB`
+    (`MIN_VALID_STREAM_BYTES`).
+  - `findLastUploadedSnapshot()` only trusts manifests describing a real
+    stream, so corrupt parents are never picked for `btrfs send -p`.
+  - `snapshot list` / restore ignore phantom manifests (they are treated as
+    absent).
+- **Incremental parent info never reached the cloud.** The cloud manifest was
+  written before the parent link was added, so a restore from a wiped machine
+  lost the whole chain. The enriched manifest (with `parent` + `snapshot`) is
+  now re-uploaded to the cloud right after every successful send.
+- **`parrot-blackbox snapshot prune` crashed** (wrong argument order passed to
+  `pruneSnapshots` — it received the state object as the accounts list). Fixed.
+- **Restore now lands inside Timeshift's real BTRFS repo.** Before, restore
+  piped into `btrfs receive /timeshift/snapshots`, which does not exist on a
+  standard BTRFS-in-LUKS install. Restore now resolves the actual
+  `timeshift-btrfs/snapshots` location (mounting `subvolid=5` when needed),
+  receives each stream into `<snapshots>/<id>/` (streams are named `@`, so the
+  received subvolume lands exactly where Timeshift expects it), writes the
+  Timeshift control file (`info.json`) and marks the subvolume read-only — so
+  `timeshift --restore --snapshot <id>` recognizes the backup immediately.
+- **Mount hygiene:** parent-snapshot mounts and restore mounts are cleaned up
+  instead of piling up in `/run`.
+
 ## [2.0.4] - 2026-09-03
 
 ### Fixed

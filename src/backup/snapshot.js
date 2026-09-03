@@ -331,7 +331,7 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
 
 /** Cleanup temporary BTRFS mount if one was created */
 export function cleanupSnapshotMount(snapshot) {
-  if (snapshot._tempMount) {
+  if (snapshot && snapshot._tempMount) {
     try {
       sudoExecSync(['umount', snapshot._tempMount]);
       sudoExecSync(['rmdir', snapshot._tempMount]);
@@ -423,15 +423,41 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
   const dir = snapshotDirFor(created, { privileged });
   const parentDir = parentSnap ? snapshotDirFor(parentSnap, { privileged }) : null;
 
+  // Timeshift (BTRFS mode) stores each snapshot as a *directory* containing an
+  // "@" snapshot subvolume. The container directory itself is NOT a subvolume
+  // and `btrfs send` fails on it with "Invalid argument". Resolve the real
+  // subvolume here, and drop to file-copy mode when the snapshots genuinely
+  // aren't subvolumes (e.g. Timeshift rsync mode).
+  const { findSnapshotSubvolume } = await import('./btrfs-send.js');
+  let subvolPath = null;
+  let parentSubvolPath = null;
+  if (useBtrfs) {
+    subvolPath = await findSnapshotSubvolume(dir, { privileged });
+    if (!subvolPath) {
+      console.log('⚠ Timeshift snapshots are not BTRFS subvolumes (rsync mode?) — falling back to file-copy mode');
+      useBtrfs = false;
+    } else if (parentDir) {
+      parentSubvolPath = await findSnapshotSubvolume(parentDir, { privileged });
+      if (!parentSubvolPath) {
+        console.log('⚠ Parent snapshot has no BTRFS subvolume — running a full send instead');
+        parentSnap = null;
+      }
+    }
+  }
+
+  // File-copy source: when the snapshot dir is a Timeshift BTRFS container
+  // (<dir>/@), walk the "@" contents so the actual system tree is uploaded.
+  const fileCopyDir = fs.existsSync(path.join(dir, '@')) ? path.join(dir, '@') : dir;
+
   let manifest;
   try {
     if (useBtrfs) {
       // V2 BTRFS send/receive path
       manifest = await uploadViaBtrfsSend({
         snapshot: created,
-        snapshotDir: dir,
+        subvolPath,
         parentSnapshot: parentSnap,
-        parentDir,
+        parentSubvolPath,
         accounts,
         cfg,
         due,
@@ -442,8 +468,7 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
       // Legacy file-copy fallback (v2 behavior)
       manifest = await uploadViaFileCopy({
         snapshot: created,
-        snapshotDir: dir,
-        parentDir,
+        snapshotDir: fileCopyDir,
         accounts,
         cfg,
         due,
@@ -454,10 +479,10 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
   } catch (e) {
     // The local snapshot exists and is safe; the cloud upload failed.
     journal('snapshots', `upload failed for ${created.name}: ${e.message}`, 'error');
-    cleanupSnapshotMount(created);
     throw e;
   } finally {
     cleanupSnapshotMount(created);
+    if (parentSnap) cleanupSnapshotMount(parentSnap);
   }
 
   manifest.due = due;
@@ -493,19 +518,15 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
  * Upload a snapshot using BTRFS send/receive streaming.
  * Creates: btrfs send [-p parent] | zstd | [openssl] | rclone rcat (chunked)
  *
- * Uses the path resolved by snapshotDirFor() (which mounts the BTRFS root subvolume
- * at a temporary mount point) so that `btrfs send` receives an actual subvolume path,
- * not a directory inside a regular mount.
+ * `subvolPath` / `parentSubvolPath` are the actual BTRFS subvolumes (resolved by
+ * findSnapshotSubvolume() — Timeshift keeps snapshots at <snapshot-dir>/@), so
+ * `btrfs send` always receives a real subvolume, never a plain directory.
  */
-async function uploadViaBtrfsSend({ snapshot, snapshotDir, parentSnapshot, parentDir, accounts, cfg, due, privileged, onProgress }) {
-  const { createSendStream, estimateSendSize } = await import('./btrfs-send.js');
+async function uploadViaBtrfsSend({ snapshot, subvolPath, parentSnapshot, parentSubvolPath, accounts, cfg, due, privileged, onProgress }) {
+  const { createSendStream, estimateSendSize, isValidBtrfsStreamManifest } = await import('./btrfs-send.js');
   const { planAndPlaceStream } = await import('../storage/allocator.js');
 
-  // snapshotDir was resolved by snapshotDirFor() — it is the real subvolume path
-  // (e.g. /run/parrot-blackbox-btrfs-<ts>/timeshift-btrfs/snapshots/<name>).
-  // Use it directly; do NOT fall back to a hardcoded absolute path.
-  const subvolPath = snapshotDir;
-  const parentSubvolPath = parentDir || null;
+  if (!subvolPath) throw new Error('no BTRFS subvolume path for snapshot upload');
 
   journal('snapshots', `btrfs send subvolPath=${subvolPath} parent=${parentSubvolPath || 'null'}`);
 
@@ -562,34 +583,78 @@ async function uploadViaBtrfsSend({ snapshot, snapshotDir, parentSnapshot, paren
     originalSize: estimatedSize,
   });
 
-  // Wait for all pipeline stages (including btrfs send itself) to exit cleanly
-  await Promise.all(pipeline.map((proc) =>
-    new Promise((resolve, reject) => {
-      proc.on('close', (code) => {
-        if (code === 0 || code === null) {
-          resolve();
-        } else {
-          const stderr = Buffer.concat(sendStderr).toString().trim();
-          reject(new Error(
-            proc === sendChild
-              ? `btrfs send failed (exit ${code})${stderr ? ': ' + stderr : ''} — is ${subvolPath} a BTRFS subvolume?`
-              : `Pipeline stage failed (exit ${code})`
-          ));
-        }
-      });
-      proc.on('error', reject);
-    })
-  ));
+  /**
+   * Abort a failed/incomplete upload so no fragment stream or manifest is left
+   * behind — exactly the corruption that previously let 13-byte phantom
+   * streams appear in the cloud and break the incremental chain.
+   */
+  const abortGhostUpload = async () => {
+    for (const proc of pipeline) { try { proc.kill('SIGKILL'); } catch { /* already gone */ } }
+    try { currentStream.destroy(); } catch { /* best effort */ }
+    // Let the concurrent uploader settle (bounded) so it can't write a manifest after we return.
+    await Promise.race([
+      manifestPromise.catch(() => {}),
+      new Promise((r) => setTimeout(r, 5000)),
+    ]);
+    const { removeArtifact } = await import('../storage/archive.js');
+    try { await removeArtifact('snapshots', snapshot.name, accounts, cfg.storage.remoteRoot); } catch { /* best effort */ }
+    try { fs.rmSync(path.join(manifestsDir(), `snapshots-${snapshot.name}.json`), { force: true }); } catch { /* best effort */ }
+  };
 
-  const manifest = await manifestPromise;
+  try {
+    // Wait for all pipeline stages (including btrfs send itself) to exit cleanly
+    await Promise.all(pipeline.map((proc) =>
+      new Promise((resolve, reject) => {
+        proc.on('close', (code) => {
+          if (code === 0 || code === null) {
+            resolve();
+          } else {
+            const stderr = Buffer.concat(sendStderr).toString().trim();
+            reject(new Error(
+              proc === sendChild
+                ? `btrfs send failed (exit ${code})${stderr ? ': ' + stderr : ''} — is ${subvolPath} a BTRFS subvolume?`
+                : `Pipeline stage failed (exit ${code})`
+            ));
+          }
+        });
+        proc.on('error', reject);
+      })
+    ));
 
-  // Save manifest locally
-  const manifestPath = path.join(manifestsDir(), `snapshots-${snapshot.name}.json`);
-  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    const manifest = await manifestPromise;
 
-  console.log(`\n✓ Uploaded ${(manifest.totalSize / (1024 ** 3)).toFixed(2)} GiB to cloud`);
-  return manifest;
+    // A real system stream is orders of magnitude larger than 1 MiB. A tiny
+    // stream means the send failed and must never be recorded as a backup.
+    if (!isValidBtrfsStreamManifest(manifest)) {
+      await abortGhostUpload();
+      throw new Error(`btrfs send produced an undersized stream (${manifest?.totalSize ?? 0} bytes) — aborting`);
+    }
+
+    // Enrich the manifest with the parent-chain info BEFORE persisting it, and
+    // push the enriched copy back to the cloud so a restore from a wiped
+    // machine can still resolve the incremental chain.
+    manifest.snapshot = snapshot.name;
+    manifest.parent = parentSnapshot?.name || null;
+
+    // Save manifest locally
+    const manifestPath = path.join(manifestsDir(), `snapshots-${snapshot.name}.json`);
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+    // Re-upload the enriched manifest (now carrying the parent link) to the cloud.
+    if (manifest.account) {
+      const { copyToFile } = await import('../storage/rclone.js');
+      const remotePath = `${manifest.account}:${manifest.remoteRoot}/snapshots/${snapshot.name}/__MANIFEST__.json`;
+      const res = await copyToFile(manifestPath, remotePath);
+      if (!res.ok) journal('snapshots', `could not refresh cloud manifest for ${snapshot.name}`, 'warn');
+    }
+
+    console.log(`\n✓ Uploaded ${(manifest.totalSize / (1024 ** 3)).toFixed(2)} GiB to cloud`);
+    return manifest;
+  } catch (err) {
+    await abortGhostUpload();
+    throw err;
+  }
 }
 
 /**
@@ -604,7 +669,10 @@ async function uploadViaFileCopy({ snapshot, snapshotDir, parentDir, accounts, c
     HOME: process.env.HOME,
     PBB_STATE_DIR: stateDir(),
     PBB_CONFIG_FILE: configFile(),
-    PBB_PARENT_DIR: parentDir || '',
+    // The subprocess must never re-enable BTRFS send — file-copy mode was
+    // chosen because the snapshots are NOT subvolumes (rsync mode, or tools
+    // missing). Re-detection in the child would resurrect the failing send.
+    PBB_DISABLE_BTRFS: '1',
   };
   const cmdArgs = [process.execPath, bin, '_internal_upload', snapshotDir, 'snapshots', snapshot.name, cfg.storage.remoteRoot, String(cfg.storage.chunkSize), outPath];
   const args = process.env.PBB_SUDO_DIRECT === '1' ? cmdArgs : ['-E', ...cmdArgs];
