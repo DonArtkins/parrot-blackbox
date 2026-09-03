@@ -401,38 +401,45 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
 /**
  * Upload a snapshot using BTRFS send/receive streaming.
  * Creates: btrfs send [-p parent] | zstd | [openssl] | rclone rcat (chunked)
- * 
- * Note: For BTRFS send to work, we need to use paths that btrfs recognizes as subvolumes.
- * On most Parrot systems, snapshots are at: /timeshift-btrfs/snapshots/<name>
- * We construct the proper subvolume path rather than using potentially-mounted paths.
+ *
+ * Uses the path resolved by snapshotDirFor() (which mounts the BTRFS root subvolume
+ * at a temporary mount point) so that `btrfs send` receives an actual subvolume path,
+ * not a directory inside a regular mount.
  */
 async function uploadViaBtrfsSend({ snapshot, snapshotDir, parentSnapshot, parentDir, accounts, cfg, due, privileged, onProgress }) {
   const { createSendStream, estimateSendSize } = await import('./btrfs-send.js');
   const { planAndPlaceStream } = await import('../storage/allocator.js');
-  
-  // Construct the actual subvolume path for BTRFS send
-  // Timeshift stores snapshots at /timeshift-btrfs/snapshots/<name> on the root BTRFS volume
-  // We need to use this path for btrfs send, not any temporarily mounted paths
-  const subvolPath = `/timeshift-btrfs/snapshots/${snapshot.name}`;
-  const parentSubvolPath = parentSnapshot ? `/timeshift-btrfs/snapshots/${parentSnapshot.name}` : null;
-  
-  journal('snapshots', `using subvolume path: ${subvolPath}`);
-  
-  // Estimate size for progress reporting (use original snapshotDir for filesystem operations)
-  const estimatedSize = await estimateSendSize(snapshotDir, { parent: parentDir });
+
+  // snapshotDir was resolved by snapshotDirFor() — it is the real subvolume path
+  // (e.g. /run/parrot-blackbox-btrfs-<ts>/timeshift-btrfs/snapshots/<name>).
+  // Use it directly; do NOT fall back to a hardcoded absolute path.
+  const subvolPath = snapshotDir;
+  const parentSubvolPath = parentDir || null;
+
+  journal('snapshots', `btrfs send subvolPath=${subvolPath} parent=${parentSubvolPath || 'null'}`);
+
+  // Estimate size for progress reporting
+  const estimatedSize = await estimateSendSize(subvolPath, { parent: parentSubvolPath });
   const btrfsCfg = cfg.jobs.snapshots.btrfs || {};
-  
-  console.log(`\n📤 Uploading ${parentDir ? 'incremental' : 'full'} BTRFS stream...`);
+
+  console.log(`\n📤 Uploading ${parentSubvolPath ? 'incremental' : 'full'} BTRFS stream...`);
   console.log(`   Estimated size: ${(estimatedSize / (1024 ** 3)).toFixed(2)} GiB`);
-  if (btrfsCfg.compression) console.log(`   Compression: zstd enabled`);
-  if (btrfsCfg.encryption && cfg.storage.encryptionPassphrase) console.log(`   Encryption: AES-256 enabled`);
+  if (btrfsCfg.compression !== false) console.log(`   Compression: zstd enabled`);
+  if (btrfsCfg.encryption && cfg.storage?.encryptionPassphrase) console.log(`   Encryption: AES-256 enabled`);
 
-  // Create the BTRFS send stream using the actual subvolume paths
-  const sendStream = await createSendStream(subvolPath, { parent: parentSubvolPath, privileged });
+  // Create the BTRFS send stream — returns {stream, child} so we can detect errors
+  const { stream: sendStream, child: sendChild } = await createSendStream(subvolPath, {
+    parent: parentSubvolPath,
+    privileged,
+  });
 
-  // Build the pipeline: btrfs send -> [zstd] -> [openssl] -> chunked rclone rcat
+  // Collect any stderr from btrfs send for better error messages
+  const sendStderr = [];
+  sendChild.stderr?.on('data', (d) => sendStderr.push(d));
+
+  // Build compression / encryption pipeline
   const { spawn } = await import('node:child_process');
-  const pipeline = [];
+  const pipeline = [sendChild]; // include send process so we wait on its exit too
   let currentStream = sendStream;
 
   // Stage 1: Compression
@@ -444,7 +451,7 @@ async function uploadViaBtrfsSend({ snapshot, snapshotDir, parentSnapshot, paren
   }
 
   // Stage 2: Encryption
-  if (btrfsCfg.encryption && cfg.storage.encryptionPassphrase) {
+  if (btrfsCfg.encryption && cfg.storage?.encryptionPassphrase) {
     const openssl = spawn('openssl', ['enc', '-e', '-aes256', '-pbkdf2', '-pass', `pass:${cfg.storage.encryptionPassphrase}`], {
       stdio: ['pipe', 'pipe', 'inherit'],
     });
@@ -454,7 +461,7 @@ async function uploadViaBtrfsSend({ snapshot, snapshotDir, parentSnapshot, paren
   }
 
   // Stage 3: Stream to cloud via allocator's planAndPlaceStream (handles chunking across accounts)
-  const manifest = await planAndPlaceStream(currentStream, {
+  const manifestPromise = planAndPlaceStream(currentStream, {
     kind: 'snapshots',
     id: snapshot.name,
     accounts,
@@ -464,11 +471,26 @@ async function uploadViaBtrfsSend({ snapshot, snapshotDir, parentSnapshot, paren
     originalSize: estimatedSize,
   });
 
-  // Wait for all pipeline stages to complete
-  await Promise.all(pipeline.map(proc => new Promise((resolve, reject) => {
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Pipeline stage failed: exit ${code}`)));
-    proc.on('error', reject);
-  })));
+  // Wait for all pipeline stages (including btrfs send itself) to exit cleanly
+  await Promise.all(pipeline.map((proc) =>
+    new Promise((resolve, reject) => {
+      proc.on('close', (code) => {
+        if (code === 0 || code === null) {
+          resolve();
+        } else {
+          const stderr = Buffer.concat(sendStderr).toString().trim();
+          reject(new Error(
+            proc === sendChild
+              ? `btrfs send failed (exit ${code})${stderr ? ': ' + stderr : ''} — is ${subvolPath} a BTRFS subvolume?`
+              : `Pipeline stage failed (exit ${code})`
+          ));
+        }
+      });
+      proc.on('error', reject);
+    })
+  ));
+
+  const manifest = await manifestPromise;
 
   // Save manifest locally
   const manifestPath = path.join(manifestsDir(), `snapshots-${snapshot.name}.json`);

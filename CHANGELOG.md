@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.2] - 2026-09-03
+
+### Fixed
+- **BTRFS upload silent failure:** `uploadViaBtrfsSend` was hardcoding `/timeshift-btrfs/snapshots/<name>` as the subvolume path instead of using the real path resolved by `snapshotDirFor()` (the BTRFS root subvolume mount at `/run/parrot-blackbox-btrfs-<ts>/...`). `btrfs send` silently failed on the non-existent path and the upload dropped without error.
+- **Undetected pipeline errors:** `createSendStream` now returns `{stream, child}` instead of just the stream, so `uploadViaBtrfsSend` waits on the `btrfs send` process exit code alongside the rest of the pipeline stages. Errors now surface with a clear message including the stderr output and the failing path.
+
 ## [2.0.1] - 2026-09-03
 
 ### Fixed

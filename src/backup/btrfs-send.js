@@ -160,7 +160,7 @@ export function getSnapshotParent(manifestPath) {
  * Create a BTRFS send stream.
  * @param {string} subvolPath - Path to the snapshot subvolume
  * @param {object} opts - {parent: string|null, privileged: 'interactive'|'noninteractive'}
- * @returns {Promise<ReadableStream>} - The send stream (not yet piped through compression/encryption)
+ * @returns {Promise<{stream: ReadableStream, child: ChildProcess}>}
  */
 export async function createSendStream(subvolPath, { parent = null, privileged = 'noninteractive' } = {}) {
   const args = ['btrfs', 'send'];
@@ -170,8 +170,9 @@ export async function createSendStream(subvolPath, { parent = null, privileged =
     args.push(subvolPath);
   }
 
-  // Spawn via sudo, return the stdout stream
-  const sudoArgs = privileged === 'interactive' 
+  // Spawn via sudo, return the stdout stream and the child process so callers
+  // can detect errors (btrfs send exits non-zero when the path is not a subvolume).
+  const sudoArgs = privileged === 'interactive'
     ? ['sudo', '-E', ...args]
     : ['sudo', '-n', ...args];
 
@@ -179,8 +180,7 @@ export async function createSendStream(subvolPath, { parent = null, privileged =
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  // Convert child.stdout to a Node readable stream
-  return child.stdout;
+  return { stream: child.stdout, child };
 }
 
 /**
