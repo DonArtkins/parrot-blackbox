@@ -129,22 +129,23 @@ export function makeProgressRenderer() {
   const BAR_WIDTH = 25;
   let lastLine = '';
 
-  function render({ done = 0, total = 0, speedMBs = 0, remote = '' } = {}) {
-    const doneMB = done / (1024 * 1024);
-    const totalMB = total / (1024 * 1024);
+  function buildLine({ done = 0, total = 0, speedMBs = 0, remote = '' } = {}) {
+    const doneMB   = done / (1024 * 1024);
+    const totalMB  = total / (1024 * 1024);
     const speedStr = speedMBs > 0 ? `  ${speedMBs.toFixed(1)} MB/s` : '';
     const destStr  = remote ? `  → ${remote}` : '';
 
-    let line;
     if (total > 0) {
       const pct    = Math.min(100, Math.round((done / total) * 100));
       const filled = Math.round((pct / 100) * BAR_WIDTH);
       const bar    = '█'.repeat(filled) + '░'.repeat(BAR_WIDTH - filled);
-      line = `  [${bar}] ${String(pct).padStart(3)}%  ${doneMB.toFixed(1)} MB / ${totalMB.toFixed(1)} MB${speedStr}${destStr}`;
-    } else {
-      line = `  ⬆  ${doneMB.toFixed(1)} MB streamed${speedStr}${destStr}`;
+      return `  [${bar}] ${String(pct).padStart(3)}%  ${doneMB.toFixed(1)} MB / ${totalMB.toFixed(1)} MB${speedStr}${destStr}`;
     }
+    return `  ⬆  ${doneMB.toFixed(1)} MB streamed${speedStr}${destStr}`;
+  }
 
+  function render(evt = {}) {
+    const line = buildLine(evt);
     if (isTTY) {
       process.stdout.write(`\r${line}\x1b[K`);
     } else if (line !== lastLine) {
@@ -157,6 +158,62 @@ export function makeProgressRenderer() {
 
   render.stop = function stop() {
     if (isTTY && lastLine) process.stdout.write('\n');
+    lastLine = '';
+  };
+
+  return render;
+}
+
+/**
+ * A @clack/prompts-aware progress renderer.
+ *
+ * Inside the clack wizard the terminal is managed by clack's ANSI cursor
+ * tracking — raw `\r` writes get clobbered.  This variant throttles output
+ * to at most one `p.log.message()` call per second so clack can handle
+ * rendering, and the bar stays readable.
+ *
+ * Usage:
+ *   import * as p from '@clack/prompts';
+ *   const progress = makeClackProgressRenderer(p);
+ *   await runSnapshotNow(undefined, undefined, { onProgress: progress });
+ *   progress.stop();
+ *
+ * Expected event shape: same as makeProgressRenderer().
+ */
+export function makeClackProgressRenderer(p) {
+  const BAR_WIDTH = 20;
+  const THROTTLE_MS = 800; // max one clack log line per 800 ms
+  let lastEmitAt = 0;
+  let lastLine = '';
+
+  function buildLine({ done = 0, total = 0, speedMBs = 0, remote = '' } = {}) {
+    const doneMB   = done / (1024 * 1024);
+    const totalMB  = total / (1024 * 1024);
+    const speedStr = speedMBs > 0 ? `  ${speedMBs.toFixed(1)} MB/s` : '';
+    const destStr  = remote ? `  → ${remote}` : '';
+
+    if (total > 0) {
+      const pct    = Math.min(100, Math.round((done / total) * 100));
+      const filled = Math.round((pct / 100) * BAR_WIDTH);
+      const bar    = '█'.repeat(filled) + '░'.repeat(BAR_WIDTH - filled);
+      return `[${bar}] ${String(pct).padStart(3)}%  ${doneMB.toFixed(1)} / ${totalMB.toFixed(1)} MB${speedStr}${destStr}`;
+    }
+    return `⬆  ${doneMB.toFixed(1)} MB streamed${speedStr}${destStr}`;
+  }
+
+  function render(evt = {}) {
+    const now  = Date.now();
+    const line = buildLine(evt);
+    if (line === lastLine) return;           // nothing changed
+    if (now - lastEmitAt < THROTTLE_MS) return; // too soon
+    lastEmitAt = now;
+    lastLine   = line;
+    p.log.message(line);
+  }
+
+  render.stop = function stop() {
+    // emit the final state unconditionally so the user sees 100% or final MB
+    if (lastLine) p.log.message(lastLine);
     lastLine = '';
   };
 

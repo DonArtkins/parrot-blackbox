@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.0.8] - 2026-09-03
+
+### Fixed — progress bar not visible inside the wizard menu
+
+- **Root cause:** the `@clack/prompts` wizard owns the terminal cursor; raw
+  `\r` overwrites from `makeProgressRenderer` were immediately clobbered by
+  clack's own ANSI rendering, so the bar flashed and disappeared.
+- **New `makeClackProgressRenderer(p)`** in `src/util/misc.js` — a
+  clack-aware variant that emits progress via `p.log.message()` throttled to
+  at most once per 800 ms, then emits a final line on `.stop()`.  This keeps
+  output stable inside clack's frame while still showing meaningful progress.
+- **`backupNowAction` (wizard "Create snapshot" / force-backup path)** was
+  missing `onProgress` entirely — the upload was completely silent even after
+  v2.0.7.  Now wired to `makeClackProgressRenderer`.
+- **`snapshotNowAction`** updated from the raw TTY renderer to the clack-aware
+  one for the same reason.
+- `makeProgressRenderer` (raw TTY version) is retained and still used by the
+  non-wizard CLI paths (`parrot-blackbox snapshot now`,
+  `parrot-blackbox force`) where clack is not active.
+
 ## [2.0.7] - 2026-09-03
 
 ### Added — Live upload progress bar with percentage, MB/s, and target remote

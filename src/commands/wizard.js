@@ -24,7 +24,7 @@ import { installService, removeService } from './service.js';
 import { startDaemon, stopDaemon, daemonRunning } from '../daemon/daemon.js';
 import { runDoctor, runStatus, runUninstallWizard } from './manage.js';
 import { runSetup } from './setup.js';
-import { bytesHuman, makeProgressRenderer } from '../util/misc.js';
+import { bytesHuman, makeClackProgressRenderer } from '../util/misc.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -139,10 +139,10 @@ async function accountsMenu() {
 
 /** Run every enabled backup right now. */
 async function backupNowAction() {
-  const s = p.spinner();
-  s.start('Running backup…');
-  s.stop('');
-  const res = await runDueJobs({ force: true, privileged: 'interactive' });
+  p.log.message(pc.dim('Running backup…'));
+  const progress = makeClackProgressRenderer(p);
+  const res = await runDueJobs({ force: true, privileged: 'interactive', onProgress: progress });
+  progress.stop();
   const report = res.report || [];
   if (report.length === 0) { p.log.message(pc.dim('No enabled backup jobs.')); return; }
   for (const r of report) {
@@ -163,7 +163,7 @@ async function backupNowAction() {
 /** Create + upload a snapshot immediately. */
 async function snapshotNowAction() {
   try {
-    const progress = makeProgressRenderer();
+    const progress = makeClackProgressRenderer(p);
     const r = await runSnapshotNow(undefined, undefined, { onProgress: progress });
     progress.stop();
     p.log.success(`✔ Snapshot ${r.snapshot} created & uploaded (${bytesHuman(r.manifest?.totalSize ?? 0)}).`);
