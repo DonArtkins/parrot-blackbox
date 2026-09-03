@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.0.7] - 2026-09-03
+
+### Added — Live upload progress bar with percentage, MB/s, and target remote
+
+- **`makeProgressRenderer()`** — new shared utility in `src/util/misc.js` that
+  returns an `onProgress` handler rendering a live, in-place progress bar.
+  On a TTY it overwrites the current line with `\r` + erase-to-end so the
+  display never scrolls:
+  ```
+    [█████████████░░░░░░░░░░░░]  53%  6823.4 MB / 13000.0 MB  4.1 MB/s  → mega-1
+  ```
+  When the stream size is unknown (BTRFS send with no parent estimate) it shows
+  bytes streamed and speed instead of a percentage bar.  On non-TTY output
+  (daemon / piped) it only prints when the line changes, avoiding log spam.
+- **`planAndPlaceStream` now emits speed** — a 1.5-second rolling window
+  calculates upload speed (`speedMBs`) and the current target `remote` are
+  included in every `onProgress` event.
+- **`snapshot now`**, **`force`/`backup`**, and the **menu wizard "Snapshot
+  now"** action all pass a renderer as `onProgress` so upload progress is
+  always visible. Before this fix every upload was completely silent — no
+  indication anything was happening after "📤 Uploading…".
+
 ## [2.0.6] - 2026-09-03
 
 ### Fixed — BTRFS send "not read-only" error, stale mounts, and process hang on exit

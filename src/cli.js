@@ -19,7 +19,7 @@ import { listAccounts, addAccount, removeAccount, refreshAccounts, poolSummary }
 import { listArtifacts } from './storage/archive.js';
 import { loadConfig, loadState, saveConfig } from './core/store.js';
 import { configFile, stateDir } from './core/paths.js';
-import { bytesHuman } from './util/misc.js';
+import { bytesHuman, makeProgressRenderer } from './util/misc.js';
 import { isOnline } from './util/network.js';
 
 const require = createRequire(import.meta.url);
@@ -388,7 +388,9 @@ const main = defineCommand({
       case 'force':
       case 'backup': {
         // Runs every ENABLED job right now (default = the weekly snapshot).
-        const res = await runDueJobs({ force: true, privileged: 'interactive' });
+        const progress = makeProgressRenderer();
+        const res = await runDueJobs({ force: true, privileged: 'interactive', onProgress: progress });
+        progress.stop();
         const report = res.report || [];
         if (report.length === 0) console.log(pc.dim('No enabled backup jobs — run `parrot-blackbox` to set up the schedule.'));
         for (const r of report) {
@@ -410,7 +412,9 @@ const main = defineCommand({
         const [sub, ...args] = rest;
         if (sub === 'now' || sub === 'create' || sub === 'force') {
           try {
-            const r = await runSnapshotNow();
+            const progress = makeProgressRenderer();
+            const r = await runSnapshotNow(undefined, undefined, { onProgress: progress });
+            progress.stop();
             console.log(`${pc.green('✔')} Snapshot ${r.snapshot} created & uploaded (${bytesHuman(r.manifest.totalSize)}).`);
             if (r.pruned?.length) console.log(pc.dim(`Pruned: ${r.pruned.join(', ')}`));
           } catch (e) {

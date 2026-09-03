@@ -269,6 +269,12 @@ export async function planAndPlaceStream(btrfsStream, { kind, id, accounts, remo
   let locs = [];
   let currentStart = 0;
   let target = getNextAccountAndPath();
+
+  // Speed tracking
+  let speedBytesWindow = 0;
+  let speedWindowStart = Date.now();
+  let currentSpeedMBs = 0;
+  const SPEED_WINDOW_MS = 1500; // recalculate speed every 1.5 s
   
   currentChild = spawn(process.env.PBB_RCLONE || 'rclone', ['rcat', `${target.remote}:${target.path}`]);
   let childFailed = false;
@@ -287,6 +293,7 @@ export async function planAndPlaceStream(btrfsStream, { kind, id, accounts, remo
       
       currentBytesInChunk += toWrite;
       totalBytes += toWrite;
+      speedBytesWindow += toWrite;
       offset += toWrite;
       
       if (!canContinue) {
@@ -309,7 +316,24 @@ export async function planAndPlaceStream(btrfsStream, { kind, id, accounts, remo
         currentChild.on('exit', (code) => { if (code !== 0) childFailed = true; });
       }
     }
-    if (onProgress) onProgress({ done: totalBytes, total: originalSize, text: `uploading stream: ${(totalBytes / (1024**2)).toFixed(1)} MB` });
+
+    // Recalculate speed on each chunk and emit progress
+    if (onProgress) {
+      const now = Date.now();
+      const elapsed = now - speedWindowStart;
+      if (elapsed >= SPEED_WINDOW_MS) {
+        currentSpeedMBs = (speedBytesWindow / (1024 * 1024)) / (elapsed / 1000);
+        speedBytesWindow = 0;
+        speedWindowStart = now;
+      }
+      onProgress({
+        done: totalBytes,
+        total: originalSize,
+        speedMBs: currentSpeedMBs,
+        remote: target.remote,
+        text: `uploading stream: ${(totalBytes / (1024 ** 2)).toFixed(1)} MB`,
+      });
+    }
   }
   
   if (currentChild) {

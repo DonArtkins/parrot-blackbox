@@ -24,7 +24,7 @@ import { installService, removeService } from './service.js';
 import { startDaemon, stopDaemon, daemonRunning } from '../daemon/daemon.js';
 import { runDoctor, runStatus, runUninstallWizard } from './manage.js';
 import { runSetup } from './setup.js';
-import { bytesHuman } from '../util/misc.js';
+import { bytesHuman, makeProgressRenderer } from '../util/misc.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -163,7 +163,9 @@ async function backupNowAction() {
 /** Create + upload a snapshot immediately. */
 async function snapshotNowAction() {
   try {
-    const r = await runSnapshotNow();
+    const progress = makeProgressRenderer();
+    const r = await runSnapshotNow(undefined, undefined, { onProgress: progress });
+    progress.stop();
     p.log.success(`✔ Snapshot ${r.snapshot} created & uploaded (${bytesHuman(r.manifest?.totalSize ?? 0)}).`);
     if (r.pruned?.length) p.log.message(pc.dim(`Pruned: ${r.pruned.join(', ')}`));
   } catch (e) {

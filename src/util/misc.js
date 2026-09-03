@@ -112,3 +112,53 @@ export function shellQuote(s) {
 export function pad2(n) {
   return String(n).padStart(2, '0');
 }
+
+/**
+ * Returns an onProgress handler that renders a live, in-place progress bar
+ * with percentage, MB transferred, and upload speed.
+ *
+ * Expected event shape:
+ *   { done: number (bytes), total: number (bytes or 0), speedMBs?: number, remote?: string }
+ *
+ * Call renderer.stop() when done to advance to the next line.
+ *
+ * When `total` is 0 (stream size unknown) we display bytes + speed only.
+ */
+export function makeProgressRenderer() {
+  const isTTY = process.stdout.isTTY;
+  const BAR_WIDTH = 25;
+  let lastLine = '';
+
+  function render({ done = 0, total = 0, speedMBs = 0, remote = '' } = {}) {
+    const doneMB = done / (1024 * 1024);
+    const totalMB = total / (1024 * 1024);
+    const speedStr = speedMBs > 0 ? `  ${speedMBs.toFixed(1)} MB/s` : '';
+    const destStr  = remote ? `  → ${remote}` : '';
+
+    let line;
+    if (total > 0) {
+      const pct    = Math.min(100, Math.round((done / total) * 100));
+      const filled = Math.round((pct / 100) * BAR_WIDTH);
+      const bar    = '█'.repeat(filled) + '░'.repeat(BAR_WIDTH - filled);
+      line = `  [${bar}] ${String(pct).padStart(3)}%  ${doneMB.toFixed(1)} MB / ${totalMB.toFixed(1)} MB${speedStr}${destStr}`;
+    } else {
+      line = `  ⬆  ${doneMB.toFixed(1)} MB streamed${speedStr}${destStr}`;
+    }
+
+    if (isTTY) {
+      process.stdout.write(`\r${line}\x1b[K`);
+    } else if (line !== lastLine) {
+      // Non-TTY (piped / daemon log): only emit when something changes to
+      // avoid flooding the journal with thousands of identical lines.
+      process.stdout.write(line + '\n');
+    }
+    lastLine = line;
+  }
+
+  render.stop = function stop() {
+    if (isTTY && lastLine) process.stdout.write('\n');
+    lastLine = '';
+  };
+
+  return render;
+}
