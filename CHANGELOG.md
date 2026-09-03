@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.0.6] - 2026-09-03
+
+### Fixed — BTRFS send "not read-only" error, stale mounts, and process hang on exit
+
+- **`btrfs send failed: subvolume … is not read-only`** — `uploadViaBtrfsSend`
+  now calls `isSubvolumeReadOnly` before invoking `btrfs send`. When the
+  subvolume is accessed via the `subvolid=5` bind-mount created by
+  `snapshotDirFor`, the kernel can expose the inner `@` subvolume as writable
+  even though Timeshift created it read-only. If it is not read-only the tool
+  now calls `setSubvolumeReadOnly(subvolPath, true)` to correct it before
+  proceeding, instead of letting `btrfs send` abort with exit 1.
+- **Stale `/run/parrot-blackbox-btrfs-*` mounts leaked after failed uploads.**
+  Added a module-level `_activeTempMounts` registry in `snapshot.js` and a
+  `process.on('exit', _cleanupAllTempMounts)` hook that unmounts every
+  temporary `subvolid=5` bind-mount at process exit, even when the snapshot
+  object that originally held the `_tempMount` reference was discarded (e.g.
+  during the resume-upload flow).
+- **Process hung indefinitely after choosing "Exit" from the wizard.** The open
+  kernel mount file descriptor kept Node's event loop alive; `runMain` returning
+  was not enough to terminate the process. `cli.js` now chains
+  `.then(() => process.exit(process.exitCode ?? 0))` onto `runMain`, so the
+  process always exits promptly after the command completes.
+- **`_internal_upload` subprocess wrote its manifest via a lazy
+  `import('node:fs').then(...)` microtask** that could be cut off when
+  `process.exit()` fired. Changed to use top-level `import fs from 'node:fs'`
+  so the write is synchronous and guaranteed before exit.
+
 ## [2.0.5] - 2026-09-03
 
 ### Fixed — BTRFS uploads and restores now work on a real Parrot (BTRFS-in-LUKS) install

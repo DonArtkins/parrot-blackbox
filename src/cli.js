@@ -2,6 +2,8 @@ import { defineCommand, runMain } from 'citty';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
 import { runSetup } from './commands/setup.js';
 import { runWizard } from './commands/wizard.js';
 import { runRepair } from './commands/manage.js';
@@ -667,7 +669,7 @@ const main = defineCommand({
             });
           }
           s.stop('✔ Upload complete');
-          import('node:fs').then(fs => fs.writeFileSync(outPath, JSON.stringify(manifest)));
+          fs.writeFileSync(outPath, JSON.stringify(manifest));
           process.exitCode = 0;
         } catch (e) {
           s.stop('✖ Upload failed');
@@ -677,16 +679,12 @@ const main = defineCommand({
           // If we are running as root via sudo, rclone might have refreshed OAuth tokens
           // and rewritten rclone.conf as root:root. Restore ownership to the real user.
           if (process.getuid && process.getuid() === 0 && process.env.SUDO_UID && process.env.SUDO_GID) {
-            import('node:fs').then(fs => {
-              import('node:path').then(path => {
-                const confPath = path.join(process.env.HOME, '.config', 'rclone', 'rclone.conf');
-                if (fs.existsSync(confPath)) {
-                  try {
-                    fs.chownSync(confPath, parseInt(process.env.SUDO_UID, 10), parseInt(process.env.SUDO_GID, 10));
-                  } catch { /* best effort */ }
-                }
-              });
-            });
+            const confPath = path.join(process.env.HOME, '.config', 'rclone', 'rclone.conf');
+            if (fs.existsSync(confPath)) {
+              try {
+                fs.chownSync(confPath, parseInt(process.env.SUDO_UID, 10), parseInt(process.env.SUDO_GID, 10));
+              } catch { /* best effort */ }
+            }
           }
         }
         return;
@@ -702,4 +700,11 @@ const main = defineCommand({
         process.exitCode = 1;
     }
   },
-});runMain(main);
+});
+
+runMain(main).then(() => {
+  // Force the process to exit cleanly regardless of any open file descriptors or
+  // kernel mounts left by subvolid=5 bind-mounts created in snapshotDirFor.
+  // process.on('exit') in snapshot.js will unmount them before we terminate.
+  process.exit(process.exitCode ?? 0);
+});

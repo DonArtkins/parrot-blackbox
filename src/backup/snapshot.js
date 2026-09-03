@@ -260,6 +260,31 @@ export async function deleteAllSnapshots({ privileged = 'interactive', onProgres
   return { deleted, failed };
 }
 /**
+ * A module-level registry of all temporary BTRFS mounts created during this
+ * process lifetime, so we can unmount them all at exit even if the snapshot
+ * object that originally held the reference was garbage-collected.
+ */
+const _activeTempMounts = new Set();
+
+/**
+ * Unmount and remove all temporary BTRFS mount points created by this process.
+ * Called on process exit and also by cleanupSnapshotMount.
+ */
+function _cleanupAllTempMounts() {
+  for (const mp of _activeTempMounts) {
+    try { sudoExecSync(['umount', mp]); } catch { /* best effort */ }
+    try { sudoExecSync(['rmdir', mp]); } catch { /* best effort */ }
+    _activeTempMounts.delete(mp);
+  }
+}
+
+// Register a process exit handler so stale mounts are always cleaned up,
+// even if the snapshot object holding _tempMount was discarded before cleanup.
+process.on('exit', _cleanupAllTempMounts);
+// Also handle abnormal exits so the mount isn't left behind after Ctrl+C
+// (SIGINT/SIGTERM handlers in cli.js call process.exit(), which fires 'exit').
+
+/**
  * Resolve the on-disk directory of a snapshot.
  * 
  * BTRFS mode stores snapshots as subvolumes on the BTRFS partition. Timeshift mounts
@@ -270,6 +295,11 @@ export async function deleteAllSnapshots({ privileged = 'interactive', onProgres
  * 2. Check static paths (rsync mode)
  * 3. Mount the BTRFS root subvolume ourselves to access snapshots persistently
  * 4. Fall back to triggering timeshift --list
+ *
+ * IMPORTANT: the mount point is registered in _activeTempMounts so that
+ * _cleanupAllTempMounts() can release it on process exit even if the snapshot
+ * object is later discarded (e.g. after a resume-upload path that builds a new
+ * snapshot object from just the name).
  */
 export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {}) {
   if (snapshot.dir && fs.existsSync(snapshot.dir)) return snapshot.dir;
@@ -301,6 +331,9 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
       const mountResult = sudoExecSync(['mount', '-o', 'subvolid=5', device, mountPoint]);
       
       if (mountResult.exitCode === 0) {
+        // Register in the global set so it is always cleaned up on exit.
+        _activeTempMounts.add(mountPoint);
+
         // Search for the snapshot in the mounted root subvolume
         const searchPaths = [
           `${mountPoint}/timeshift-btrfs/snapshots/${snapshot.name}`,
@@ -311,12 +344,13 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
         const found = searchPaths.find((p) => fs.existsSync(p));
         
         if (found) {
-          // Store the mount point for cleanup later
+          // Store the mount point on the snapshot object for explicit early cleanup.
           snapshot._tempMount = mountPoint;
           return found;
         }
         
-        // Unmount if we didn't find anything
+        // Unmount immediately if we didn't find anything useful.
+        _activeTempMounts.delete(mountPoint);
         sudoExecSync(['umount', mountPoint]);
         sudoExecSync(['rmdir', mountPoint]);
       }
@@ -332,13 +366,15 @@ export function snapshotDirFor(snapshot, { privileged = 'noninteractive' } = {})
 /** Cleanup temporary BTRFS mount if one was created */
 export function cleanupSnapshotMount(snapshot) {
   if (snapshot && snapshot._tempMount) {
+    const mp = snapshot._tempMount;
     try {
-      sudoExecSync(['umount', snapshot._tempMount]);
-      sudoExecSync(['rmdir', snapshot._tempMount]);
-      delete snapshot._tempMount;
+      sudoExecSync(['umount', mp]);
+      sudoExecSync(['rmdir', mp]);
     } catch {
       /* best effort */
     }
+    _activeTempMounts.delete(mp);
+    delete snapshot._tempMount;
   }
 }
 
@@ -523,10 +559,29 @@ export async function runSnapshotBackup(cfg, state, { due, privileged = 'noninte
  * `btrfs send` always receives a real subvolume, never a plain directory.
  */
 async function uploadViaBtrfsSend({ snapshot, subvolPath, parentSnapshot, parentSubvolPath, accounts, cfg, due, privileged, onProgress }) {
-  const { createSendStream, estimateSendSize, isValidBtrfsStreamManifest } = await import('./btrfs-send.js');
+  const { createSendStream, estimateSendSize, isValidBtrfsStreamManifest, isSubvolumeReadOnly, setSubvolumeReadOnly } = await import('./btrfs-send.js');
   const { planAndPlaceStream } = await import('../storage/allocator.js');
 
   if (!subvolPath) throw new Error('no BTRFS subvolume path for snapshot upload');
+
+  // ── RO guard ──────────────────────────────────────────────────────────────
+  // btrfs send requires the subvolume to be read-only (ro=true). Timeshift
+  // always creates snapshots as RO, but when they are accessed via a
+  // subvolid=5 bind-mount the kernel may report the inner @ subvolume as
+  // rw=false (writable) depending on mount flags. Detect and fix this before
+  // handing the path to btrfs send, otherwise the send exits 1 with
+  // "subvolume … is not read-only".
+  const isRO = await isSubvolumeReadOnly(subvolPath, { privileged });
+  if (!isRO) {
+    journal('snapshots', `subvolume ${subvolPath} is not read-only — setting ro=true before send`);
+    try {
+      await setSubvolumeReadOnly(subvolPath, true, { privileged });
+      journal('snapshots', `set ${subvolPath} read-only OK`);
+    } catch (e) {
+      throw new Error(`btrfs send requires a read-only subvolume but ${subvolPath} is writable and could not be set read-only: ${e.message}`);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   journal('snapshots', `btrfs send subvolPath=${subvolPath} parent=${parentSubvolPath || 'null'}`);
 
