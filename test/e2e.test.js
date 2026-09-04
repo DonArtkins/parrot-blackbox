@@ -472,6 +472,36 @@ test('restore snapshot: downloads cloud snapshot & hands to timeshift --restore'
   assert.equal(accept.exitCode, 0, accept.stdout.substring(0, 500));
   assert.ok(/Restoring|restore/i.test(accept.stdout), accept.stdout);
 });
+test('urgent upload resumes an interrupted generation (reuses the pending id)', async () => {
+  const s = setupSandbox('urgentresume');
+  populateHome(s);
+  addRemote(s.env, { remote: 'megaUr', quotaGiB: 20 });
+  const add = await runCli(['account', 'add', 'mega', 'megaUr'], s.env);
+  assert.equal(add.exitCode, 0, add.stdout + add.stderr);
+
+  // Simulate a power-cut mid-upload: the crash-safe pending marker was
+  // persisted but the manifest never landed on disk.
+  const statePath = path.join(s.env.PBB_STATE_DIR, 'state.json');
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    urgentPending: { id: '2026-09-03T23:00:00', since: '2026-09-03T23:00:00' },
+  }));
+
+  const r = await runCli(['urgent'], s.env);
+  assert.equal(r.exitCode, 0, r.stdout + r.stderr);
+
+  // The resumed run must REUSE the interrupted id — not mint a fresh one.
+  const mf = fs.readdirSync(path.join(s.env.PBB_STATE_DIR, 'manifests'))
+    .filter((f) => f.startsWith('urgent-'));
+  assert.equal(mf.length, 1, `expected exactly one urgent manifest, got ${mf.join(', ')}`);
+  assert.ok(mf[0].includes('2026-09-03T23:00:00'), `reused interrupted id, got ${mf[0]}`);
+  assert.ok(r.stdout.includes('resumed'), 'CLI reports the run resumed the interrupted upload');
+
+  // The pending marker is cleared only after a fully-landed upload.
+  const st2 = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  assert.ok(!st2.urgentPending, 'pending marker cleared after completion');
+});
+
 test('repair: fixes a broken install (tools, config, service, pool) without hanging', async () => {
   const s = setupSandbox('repair');
   populateHome(s);

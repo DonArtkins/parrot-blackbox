@@ -17,7 +17,8 @@ import { guidedRemoteAdd } from './remote.js';
 import { listAccounts, refreshAccounts, poolSummary, addAccount, removeAccount } from '../storage/accounts.js';
 import { loadConfig, saveConfig } from '../core/store.js';
 import { runDueJobs } from '../daemon/scheduler.js';
-import { runSnapshotNow, listLocalSnapshots, deleteSnapshot, deleteAllSnapshots } from '../backup/snapshot.js';
+import { runSnapshotNow, listLocalSnapshots, deleteSnapshot, deleteAllSnapshots, nextSnapshotUploadMode } from '../backup/snapshot.js';
+import { runUrgentBackup } from '../backup/urgent.js';
 import { listArtifacts } from '../storage/archive.js';
 import { restoreFiles, restoreSnapshot } from '../backup/restore.js';
 import { installService, removeService } from './service.js';
@@ -29,6 +30,10 @@ import { bytesHuman, makeClackProgressRenderer } from '../util/misc.js';
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
 
+/** Set once a self-update happened inside THIS process — the wizard then
+ *  warns that it is still running the OLD code until restarted. */
+let updatedInSession = false;
+
 async function importSelf() {
   return import('../lib/self.js');
 }
@@ -38,7 +43,7 @@ async function autoUpdateCheck() {
   const { checkForUpdate, promptSelfUpdate } = await importSelf();
   try {
     const { outdated } = await checkForUpdate();
-    if (outdated) await promptSelfUpdate();
+    if (outdated && await promptSelfUpdate()) updatedInSession = true;
   } catch {
     /* offline / npm missing — never block the wizard on the update check */
   }
@@ -140,6 +145,19 @@ async function accountsMenu() {
 /** Run every enabled backup right now. */
 async function backupNowAction() {
   p.log.message(pc.dim('Running backup…'));
+  const cfg = loadConfig();
+  // Warn BEFORE a FULL baseline snapshot upload (10s of GiB, hours long) is
+  // accidentally started from "Run all backups".
+  if (cfg.jobs?.snapshots?.enabled !== false) {
+    const mode = await nextSnapshotUploadMode({ cfg, privileged: 'interactive' });
+    if (mode.full) {
+      const ok = await p.confirm({
+        message: pc.red('⚠ No previous snapshot found — the snapshot backup will be a FULL baseline upload of the ENTIRE system (10s of GiB, can take hours). Continue?'),
+        initialValue: false,
+      });
+      if (p.isCancel(ok) || !ok) { p.log.message(pc.dim('Aborted — nothing was uploaded.')); return; }
+    }
+  }
   const progress = makeClackProgressRenderer(p);
   const res = await runDueJobs({ force: true, privileged: 'interactive', onProgress: progress });
   progress.stop();
@@ -160,9 +178,49 @@ async function backupNowAction() {
   }
 }
 
+/** One-off rescue backup: working files + VS Codium + gitswitch/SSH data (fast, for a fresh install). */
+async function urgentBackupAction() {
+  const cfg = loadConfig();
+  if (!listAccounts().length) { p.log.warn('No cloud accounts configured — add one from the menu first.'); return; }
+  const { URGENT_SOURCES } = await import('../backup/urgent.js');
+  const names = URGENT_SOURCES.map((s) => s.replace(/^~\//, ''));
+  const ok = await p.confirm({
+    message: pc.bold(`⚡ Urgent backup: ${names.length} sources`) +
+      pc.dim(` — ${names.join(', ')}.`) +
+      pc.dim('\nGit-tracked folders are skipped (already on GitHub); only real files + tool profiles are stored. Continue?'),
+    initialValue: true,
+  });
+  if (p.isCancel(ok) || !ok) { p.log.message(pc.dim('Cancelled — nothing was backed up.')); return; }
+
+  const progress = makeClackProgressRenderer(p);
+  try {
+    const r = await runUrgentBackup(cfg, undefined, { onProgress: progress });
+    p.log.success(`✔ Urgent backup stored (${bytesHuman(r.sizeBytes)}). Restore later via: Restore backup → Urgent backup.`);
+    if (r.skippedRepos?.length) p.log.message(pc.dim(`Skipped ${r.skippedRepos.length} git-tracked folder(s).`));
+    if (r.missing?.length) p.log.message(pc.dim(`Source(s) not present, skipped: ${r.missing.join(', ')}.`));
+  } catch (e) {
+    p.log.warn(`✖ ${e.message}`);
+  } finally {
+    progress.stop();
+  }
+}
+
 /** Create + upload a snapshot immediately. */
 async function snapshotNowAction() {
   try {
+    // A full baseline sends the ENTIRE system subvolume (10s of GiB, hours).
+    // Confirm BEFORE creating the snapshot so the user can back out cheaply.
+    const mode = await nextSnapshotUploadMode({ cfg: loadConfig(), privileged: 'interactive' });
+    if (mode.full) {
+      const ok = await p.confirm({
+        message: pc.red('⚠ No previous snapshot found — this will be a FULL baseline upload of the ENTIRE system (10s of GiB, can take hours). Continue?'),
+        initialValue: false,
+      });
+      if (p.isCancel(ok) || !ok) { p.log.message(pc.dim('Aborted — nothing was uploaded.')); return; }
+    } else if (mode.parent) {
+      p.log.message(pc.dim(`Incremental upload (parent: ${mode.parent}).`));
+    }
+
     const progress = makeClackProgressRenderer(p);
     const r = await runSnapshotNow(undefined, undefined, { onProgress: progress });
     progress.stop();
@@ -194,6 +252,10 @@ async function listBackupsAction() {
     const files = await listArtifacts('files', accs, cfg.storage.remoteRoot);
     if (!files.length) p.log.message(pc.dim('  none'));
     for (const f of files) p.log.message(`  - ${pc.cyan(f.id)}  ${bytesHuman(f.totalSize)}`);
+    p.log.message(pc.bold('Cloud urgent backups:'));
+    const urgent = await listArtifacts('urgent', accs, cfg.storage.remoteRoot);
+    if (!urgent.length) p.log.message(pc.dim('  none'));
+    for (const u of urgent) p.log.message(`  - ${pc.cyan(u.id)}  ${bytesHuman(u.totalSize)}`);
   } else {
     p.log.message(pc.dim('No accounts configured — add one from the menu.'));
   }
@@ -235,7 +297,8 @@ async function deleteSnapshotsMenu() {
   // ── Delete ALL ─────────────────────────────────────────────────────────────
   if (pick === '__all') {
     const confirm = await p.confirm({
-      message: pc.red(`Delete ALL ${snapshots.length} local snapshot(s)? This cannot be undone.`),
+      message: pc.red(`Delete ALL ${snapshots.length} local snapshot(s)? This cannot be undone.`) +
+        pc.yellow(' No parent snapshot will remain — the NEXT backup becomes a FULL baseline upload of the entire system (10s of GiB, can take hours).'),
       initialValue: false,
     });
     if (p.isCancel(confirm) || !confirm) {
@@ -265,7 +328,8 @@ async function deleteSnapshotsMenu() {
 
   // ── Delete ONE ─────────────────────────────────────────────────────────────
   const confirm = await p.confirm({
-    message: pc.yellow(`Delete snapshot ${pc.bold(pick)}?`),
+    message: pc.yellow(`Delete snapshot ${pc.bold(pick)}?`) +
+      (snapshots.length === 1 ? pc.yellow(' This is the last snapshot — the next backup will be a FULL baseline upload.') : ''),
     initialValue: false,
   });
   if (p.isCancel(confirm) || !confirm) {
@@ -282,7 +346,27 @@ async function deleteSnapshotsMenu() {
   }
 }
 
-/** Restore files or a system snapshot. */
+/** Restore a file-like artifact ('files' or 'urgent') into a fresh directory. */
+async function restoreFileLike(kind, accs, cfg) {
+  const artifacts = await listArtifacts(kind, accs, cfg.storage.remoteRoot);
+  if (!artifacts.length) { p.log.warn(`No ${kind === 'urgent' ? 'urgent' : 'file'} backups found.`); return; }
+  const id = await p.select({
+    message: 'Pick a backup to restore:',
+    options: artifacts.map((a) => ({ value: a.id, label: `${a.id}  (${bytesHuman(a.totalSize)})` })).concat([{ value: '__back', label: '← Back' }]),
+  });
+  if (p.isCancel(id) || id === '__back') return;
+  const toDir = await p.text({ message: 'Restore into which directory?', initialValue: `./restored-${id}` });
+  if (p.isCancel(toDir) || !toDir) return;
+  fs.mkdirSync(toDir, { recursive: true });
+  try {
+    const res = await restoreFiles({ id, toDir, accounts: accs, cfg, kind });
+    p.log.success(`✔ Restored ${res.files} file(s), ${bytesHuman(res.bytes)} into ${toDir}`);
+  } catch (e) {
+    p.log.warn(`✖ ${e.message}`);
+  }
+}
+
+/** Restore files / urgent backup / system snapshot. */
 async function restoreMenu() {
   const accs = listAccounts();
   if (!accs.length) { p.log.warn('No cloud accounts configured yet.'); return; }
@@ -291,29 +375,15 @@ async function restoreMenu() {
     message: '♻️  Restore backup',
     options: [
       { value: 'files', label: '📄 Files', hint: 'recover documents, images, etc.' },
+      { value: 'urgent', label: '⚡ Urgent backup', hint: 'user files + tool profiles (fresh install)' },
       { value: 'snapshot', label: '💽 System snapshot', hint: 'full system restore [sudo]' },
       { value: 'back', label: '← Back' },
     ],
   });
   if (p.isCancel(kind) || kind === 'back') return;
 
-  if (kind === 'files') {
-    const artifacts = await listArtifacts('files', accs, cfg.storage.remoteRoot);
-    if (!artifacts.length) { p.log.warn('No file backups found.'); return; }
-    const id = await p.select({
-      message: 'Pick a backup generation:',
-      options: artifacts.map((a) => ({ value: a.id, label: `${a.id}  (${bytesHuman(a.totalSize)})` })).concat([{ value: '__back', label: '← Back' }]),
-    });
-    if (p.isCancel(id) || id === '__back') return;
-    const toDir = await p.text({ message: 'Restore into which directory?', initialValue: `./restored-${id}` });
-    if (p.isCancel(toDir) || !toDir) return;
-    fs.mkdirSync(toDir, { recursive: true });
-    try {
-      const res = await restoreFiles({ id, toDir, accounts: accs, cfg });
-      p.log.success(`✔ Restored ${res.files} file(s), ${bytesHuman(res.bytes)} into ${toDir}`);
-    } catch (e) {
-      p.log.warn(`✖ ${e.message}`);
-    }
+  if (kind === 'files' || kind === 'urgent') {
+    await restoreFileLike(kind, accs, cfg);
     return;
   }
 
@@ -401,10 +471,19 @@ export async function runWizard() {
   await autoUpdateCheck();
 
   for (;;) {
+    // After an in-session self-update THIS process is still running the loaded
+    // (old) code — that's exactly the trap that makes uploads look silent in a
+    // stale session. Remind once per update so the user restarts.
+    if (updatedInSession) {
+      p.log.warn(`⚠ Updated earlier this session — this process still runs the OLD v${pkg.version} code. Exit and re-run \`parrot-blackbox\` to use the new version.`);
+      updatedInSession = false;
+    }
+
     const action = await p.select({
       message: 'What would you like to do?',
       options: [
         { value: 'snapshot', label: '📸 Create snapshot', hint: 'backup your system now' },
+        { value: 'urgent', label: '⚡ Urgent backup', hint: 'files + tool profiles, fast — rescue for a fresh install' },
         { value: 'resume', label: '⏳ Resume upload', hint: 'resume incomplete backup uploads' },
         { value: 'backup', label: '💾 Run all backups', hint: 'snapshots + file backups' },
         { value: 'restore', label: '♻️  Restore backup', hint: 'files or system snapshot' },
@@ -436,6 +515,7 @@ export async function runWizard() {
         case 'accounts': await accountsMenu(); break;
         case 'tools': await runToolsCheck(); break;
         case 'snapshot': await snapshotNowAction(); break;
+        case 'urgent': await urgentBackupAction(); break;
         case 'resume': await snapshotNowAction(); break;
         case 'backup': await backupNowAction(); break;
         case 'list': await listBackupsAction(); break;
@@ -446,8 +526,8 @@ export async function runWizard() {
         case 'setup': await runSetup(); break;
         case 'status': await runStatus(); break;
         case 'doctor': await runDoctor(); break;
-        case 'repair': { const { runRepair } = await import('./manage.js'); await runRepair(); break; }
-        case 'update': { const { runSelfUpdate } = await import('../lib/self.js'); await runSelfUpdate(); break; }
+        case 'repair': { const { runRepair } = await import('./manage.js'); const res = await runRepair(); if (res?.updated) updatedInSession = true; break; }
+        case 'update': { const { runSelfUpdate } = await import('../lib/self.js'); if (await runSelfUpdate()) updatedInSession = true; break; }
         case 'uninstall': await runUninstallWizard(); p.outro('parrot-blackbox removed — cloud backups are safe.'); return;
         default: break;
       }

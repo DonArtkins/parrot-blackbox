@@ -134,6 +134,32 @@ test('chooseAccount spreads small files onto the least-full account', () => {
   assert.equal(chooseAccount(1 * 1024 ** 3, megaFull).remote, 'gd2', 'falls back to gdrive when mega full');
 });
 
+test('chooseAccount ignores near-empty usage noise and refills in account order', () => {
+  // Three identical MEGA accounts. rclone `about` reports phantom usage on the
+  // first (tens of MiB) — this must NOT make the allocator skip it / start
+  // somewhere random. An all-empty pool is filled mega-1 → mega-2 → … .
+  const MB = 1024 * 1024;
+  const accounts = [
+    { id: 'a', provider: 'mega', remote: 'mega-1', total: 20 * 1024 ** 3, used: 41 * MB, free: 20 * 1024 ** 3 - 41 * MB },
+    { id: 'b', provider: 'mega', remote: 'mega-2', total: 20 * 1024 ** 3, used: 0,       free: 20 * 1024 ** 3 },
+    { id: 'c', provider: 'mega', remote: 'mega-3', total: 20 * 1024 ** 3, used: 0,       free: 20 * 1024 ** 3 },
+  ];
+  const pool = accounts.map((a) => ({ ...a }));
+  const pick = (need) => {
+    const acc = chooseAccount(need, pool);
+    const hit = pool.find((x) => x.id === acc.id);
+    hit.used += need;
+    hit.free -= need;
+    return acc.remote;
+  };
+  assert.equal(pick(200 * MB), 'mega-1', 'phantom usage on mega-1 is ignored → starts with mega-1');
+  assert.equal(pick(200 * MB), 'mega-2', 'once mega-1 is meaningfully fuller, mega-2 is next');
+  assert.equal(pick(200 * MB), 'mega-3', 'then mega-3 — accounts fill in pool order');
+  // mega-1 is only ~0.2% fuller than mega-2/3 → still within the 0.5% noise
+  // band → treated as a tie → earliest account (mega-1) wins again.
+  assert.equal(pick(200 * MB), 'mega-1', 'small differences still count as a tie → order wins');
+});
+
 test('walkFiles returns files + dirs with sane sizes, skipping symlinks', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pbb-walk-'));
   fs.mkdirSync(path.join(dir, 'sub'));
@@ -265,6 +291,41 @@ test('findLastUploadedSnapshot ignores phantom manifests and missing local snaps
   assert.equal(findLastUploadedSnapshot('/definitely/not/a/dir', locals), null);
 });
 
+test('nextSnapshotUploadMode flags a FULL baseline vs incremental BEFORE creating', async () => {
+  const { nextSnapshotUploadMode } = await import('../src/backup/snapshot.js');
+  const { MIN_VALID_STREAM_BYTES } = await import('../src/backup/btrfs-send.js');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pbb-mode-'));
+  const cfg = { jobs: { snapshots: { btrfs: { enabled: true, incremental: true } } } };
+
+  // Zero snapshots → the wizard MUST warn about a full baseline.
+  assert.deepEqual(
+    await nextSnapshotUploadMode({ cfg, localSnaps: [], manifestsDirOverride: dir }),
+    { full: true, parent: null, reason: 'no fully-uploaded parent snapshot on disk' },
+  );
+
+  // A valid, still-present parent manifest → incremental (no warning needed).
+  const real = {
+    schema: 2,
+    kind: 'snapshots',
+    id: '2026-09-03_12-08-44',
+    entries: [{ rel: 'btrfs.stream', type: 'file', size: MIN_VALID_STREAM_BYTES, split: true, loc: [{ remote: 'm', path: 'p' }] }],
+  };
+  fs.writeFileSync(path.join(dir, 'snapshots-2026-09-03_12-08-44.json'), JSON.stringify(real));
+  assert.deepEqual(
+    await nextSnapshotUploadMode({ cfg, localSnaps: [{ name: '2026-09-03_12-08-44', tags: 'W' }], manifestsDirOverride: dir }),
+    { full: false, parent: '2026-09-03_12-08-44', reason: null },
+  );
+
+  // BTRFS disabled → no full-stream warning (file-copy mode instead).
+  const cfgOff = { jobs: { snapshots: { btrfs: { enabled: false, incremental: true } } } };
+  assert.equal((await nextSnapshotUploadMode({ cfg: cfgOff, localSnaps: [], manifestsDirOverride: dir })).full, false);
+
+  // incremental disabled in config → full sends are user-intended, don't warn.
+  const cfgNoInc = { jobs: { snapshots: { btrfs: { enabled: true, incremental: false } } } };
+  assert.equal((await nextSnapshotUploadMode({ cfg: cfgNoInc, localSnaps: [], manifestsDirOverride: dir })).full, false);
+});
+
 test('snapshotEpochFromName parses Timeshift names and falls back to now', async () => {
   const { snapshotEpochFromName } = await import('../src/backup/restore.js');
   const got = snapshotEpochFromName('2026-09-03_12-08-44');
@@ -277,4 +338,91 @@ test('snapshotEpochFromName parses Timeshift names and falls back to now', async
   // Garbage falls back to the current time (no crash, no NaN).
   const fb = snapshotEpochFromName('not-a-snapshot');
   assert.ok(Number.isFinite(fb) && fb > 1_500_000_000);
+});
+
+test('collectFiles backs up bare-file sources verbatim, skips git repos and missing sources', async () => {
+  const { collectFiles } = await import('../src/backup/git-exclude.js');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pbb-collect-'));
+  fs.mkdirSync(path.join(home, 'Desktop'), { recursive: true });
+  fs.mkdirSync(path.join(home, 'Programming'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Desktop', 'note.txt'), 'hi');
+  fs.writeFileSync(path.join(home, '.gitconfig'), '[user]\n\tname = T\n');
+  fs.writeFileSync(path.join(home, 'Programming', 'plain.txt'), 'x');
+  fs.mkdirSync(path.join(home, 'Programming', 'gitproj', '.git'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Programming', 'gitproj', 'tracked.txt'), 'y');
+
+  const col = collectFiles(['~/Desktop', '~/.gitconfig', '~/Programming', '~/DoesNotExist'], {
+    exclude: ['**/.cache/**', '**/node_modules/**'],
+    home,
+  });
+
+  const rels = col.files.map((f) => f.rel).sort();
+  assert.ok(rels.includes('Desktop/note.txt'), 'folder source is walked');
+  assert.ok(rels.includes('.gitconfig'), 'bare-file source is backed up verbatim');
+  assert.ok(rels.includes('Programming/plain.txt'), 'plain nested file included');
+  assert.ok(!rels.includes('Programming/gitproj/tracked.txt'), 'nested git repo is skipped (GitHub owns it)');
+  assert.ok(col.skippedRepos.includes(path.join(home, 'Programming', 'gitproj')), 'nested git repo reported');
+  assert.deepEqual(col.missing, ['~/DoesNotExist'], 'missing source reported, not fatal');
+});
+
+test('urgent module exposes the rescue source list, lean excludes and helper functions', async () => {
+  const urgent = await import('../src/backup/urgent.js');
+  assert.equal(urgent.KIND, 'urgent');
+  assert.equal(typeof urgent.runUrgentBackup, 'function');
+  assert.equal(typeof urgent.buildUrgentBundle, 'function');
+
+  for (const d of ['Desktop', 'Downloads', 'Documents', 'Learning', 'Music', 'Pictures', 'Programming', 'Videos']) {
+    assert.ok(urgent.URGENT_SOURCES.includes(`~/${d}`), `working source ~/${d}`);
+  }
+  for (const d of ['~/.vscode-oss', '~/.vscode-oss-shared', '~/.config/VSCodium/User', '~/.gitswitch', '~/.ssh', '~/.gitconfig']) {
+    assert.ok(urgent.URGENT_SOURCES.includes(d), `tooling source ${d}`);
+  }
+  // Bloat / cache noise must be excluded, never uploaded.
+  for (const p of ['**/node_modules/**', '**/.git/**', '**/.cache/**', '**/Cache/**', '**/Code Cache/**', '**/GPUCache/**']) {
+    assert.ok(urgent.URGENT_EXCLUDE.includes(p), `lean exclude ${p}`);
+  }
+});
+
+test('urgent sources collect correctly in a sandbox home (git repos skipped, files verbatim)', async () => {
+  const { collectFiles } = await import('../src/backup/git-exclude.js');
+  const { URGENT_SOURCES, URGENT_EXCLUDE } = await import('../src/backup/urgent.js');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pbb-urgent-'));
+  fs.mkdirSync(path.join(home, 'Desktop'), { recursive: true });
+  fs.mkdirSync(path.join(home, 'Pictures'), { recursive: true });
+  fs.mkdirSync(path.join(home, 'Music'), { recursive: true });
+  fs.mkdirSync(path.join(home, '.ssh'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Desktop', 'note.txt'), 'hi');
+  fs.writeFileSync(path.join(home, 'Pictures', 'img.bin'), 'xx');
+  fs.writeFileSync(path.join(home, '.gitconfig'), 'cfg');
+  fs.writeFileSync(path.join(home, '.ssh', 'config'), '# ssh');
+  fs.mkdirSync(path.join(home, 'Music', 'gitproj', '.git'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'Music', 'gitproj', 'tracked.txt'), 'z');
+
+  const col = collectFiles(URGENT_SOURCES, { exclude: URGENT_EXCLUDE, home });
+  const rels = col.files.map((f) => f.rel);
+  assert.ok(rels.includes('Desktop/note.txt'), 'Desktop walked');
+  assert.ok(rels.includes('Pictures/img.bin'), 'Pictures walked');
+  assert.ok(rels.includes('.gitconfig'), '.gitconfig backed up verbatim');
+  assert.ok(rels.includes('.ssh/config'), '.ssh walked');
+  assert.ok(!rels.some((r) => r.includes('gitproj')), 'nested git repo skipped');
+  assert.ok(col.skippedRepos.some((r) => r.endsWith('gitproj')), 'git repo reported as skipped');
+  // Sources absent from the sandbox (e.g. no VSCodium install) are tolerated.
+  assert.ok(Array.isArray(col.missing), 'missing sources tolerated');
+test('parseTransferFrame reads rclone byte progress but ignores the file-count frame', async () => {
+  const { parseTransferFrame } = await import('../src/storage/rclone.js');
+  const MB = 1024 * 1024;
+  const byteFrame = 'Transferred:   \t    4.082 MiB / 20 MiB, 20%, 0 B/s, ETA -';
+  assert.deepEqual(
+    parseTransferFrame(byteFrame),
+    { done: Math.round(4.082 * MB), total: 20 * MB },
+    'parses the BYTE frame',
+  );
+  // The separate file-count progress line must NOT be mistaken for bytes.
+  assert.equal(parseTransferFrame('Transferred:            0 / 2, 0%'), null, 'file-count frame ignored');
+  assert.equal(parseTransferFrame('Checks:                 0 / 0, -, Listed 2'), null, 'non-Transferred line ignored');
+  assert.equal(parseTransferFrame(''), null, 'empty frame ignored');
+  // Final 100% frame.
+  const finalFrame = 'Transferred:   	       12 MiB / 12 MiB, 100%, 3.018 MiB/s, ETA 0s';
+  assert.deepEqual(parseTransferFrame(finalFrame), { done: 12 * MB, total: 12 * MB }, 'parses final 100% frame');
+});
 });

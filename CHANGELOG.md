@@ -1,5 +1,132 @@
 # Changelog
 
+## [2.2.0] - 2026-09-04
+
+### Added — ⚡ Urgent backup resumes an interrupted upload
+
+- The urgent (and file) upload path previously had **no resume**: a power cut or
+  crash mid-upload meant the next `parrot-blackbox urgent` started a **brand-new
+  generation from scratch**, re-uploading everything.
+- **Now `⚡ Urgent backup` is crash-safe and auto-resumes.** Before any long work
+  begins a pending marker (`state.urgentPending.id`) is persisted atomically. If
+  the process dies mid-transfer, the next urgent run **reuses the same id**, and
+  because `rclone copy` is per-file idempotent, **already-uploaded files are
+  skipped** — only the remainder is transferred, then the manifest is rewritten.
+  The marker is cleared only once the upload fully lands (cloud + local mirror).
+- The CLI reports a resumed run: `✔ Urgent backup resumed & stored (…)`.
+- New e2e sandbox test proves an interrupted id is reused (no duplicate
+  generation) and the marker clears on success.
+
+## [2.1.2] - 2026-09-04
+
+### Fixed — restore overwrites existing files (no conflicts on a fresh install)
+
+- rclone's default copy **skips a destination file that "looks newer"** (same
+  size but a newer mtime) — which is exactly what a fresh install's default
+  files are. Restoring your **urgent / file backup** over them silently kept
+  the defaults and skipped your backed-up versions, leaving half-restored,
+  conflicting state. Restores now run with **`--ignore-times`**, so
+  `restore files` / `restore urgent` **always reproduce the backed-up files
+  over anything already on disk** (the one-by-one fallback and split-file
+  reassembly paths were hardened the same way).
+
+### Fixed — an all-empty MEGA pool now always starts with mega-1 (order, not noise)
+
+- The allocator's "least-full" water-fill chased **`rclone about` usage noise**:
+  MEGA inconsistently reports a few bytes to tens-of-MiB of phantom usage on
+  empty accounts, so an empty pool could start on a random account (mega-4)
+  instead of mega-1. Differences below **0.5% of quota** are now treated as a
+  tie, and a tie goes to the account **earliest in the configured pool order**
+  — an empty pool is always filled `mega-1 → mega-2 → mega-3 → …`, while
+  meaningful real usage differences still water-fill as before.
+
+## [2.1.1] - 2026-09-04
+
+### Fixed — file & urgent backups now show LIVE byte progress (was stuck at 0%)
+
+- **`⚡ Urgent backup` (and file backups) showed a frozen progress bar at
+  0%** even though the upload was running fine. Two compounding bugs caused
+  it:
+  - `planAndPlace` fired `onProgress` only **once per account-batch** — each
+    batch was a single blocking `rclone copy --files-from` call whose output was
+    never read, so no progress events arrived during the actual transfer.
+  - The few events it did send used **file counts** as if they were bytes — the
+    renderers (`makeProgressRenderer` / `makeClackProgressRenderer`) interpret
+    `done`/`total` as bytes, so a 500-file bundle showed `0.0 / 0.0 MB` →
+    a bar that mathematically cannot move.
+- **Fix:** `copyBatch` now adds `--progress --stats=1s` and **streams rclone's
+  `Transferred:` frames** (~1/sec byte updates), emitting `{ done,total }` in bytes
+  (the separate file-count `Transferred: 3 / 5` line is deliberately ignored).
+  `planAndPlace` switched to **cumulative byte accounting** across batches and
+  split-file parts, so the bar climbs 0% → 100% with MB + speed — exactly
+  like the snapshot stream path. Proven to work through pipes/daemon logs
+  (non-TTY), not just the menu.
+
+## [2.1.0] - 2026-09-04
+
+### Added — ⚡ Urgent backup (fast rescue artifact for a fresh install)
+
+- **New menu entry `⚡ Urgent backup`** (and the `parrot-blackbox urgent` command)
+  bundles everything you need on day one into one quick cloud artifact (kind
+  `urgent`, stored under its own bucket so it's never pruned/confused with
+  scheduled backups):
+  - **Working files** — `~/Desktop`, `~/Downloads`, `~/Documents`, `~/Learning`,
+    `~/Music`, `~/Pictures`, `~/Programming`, `~/Videos`.
+  - **VS Codium** — data profile + extensions (`~/.vscode-oss`), shared storage
+    (`~/.vscode-oss-shared`) and the user config (`~/.config/VSCodium/User`).
+  - **gitswitch / SSH / git** — `~/.gitswitch` bookkeeping, `~/.ssh` (the keys
+    gitswitch manages), and `~/.gitconfig`.
+  - Still honours the golden rule: folders inside a **git work tree are skipped**
+    (GitHub already owns them) and a lean exclude list drops `node_modules`,
+    caches and session noise — so it stays fast and small.
+- **Restore** — `♻️  Restore backup → ⚡ Urgent backup` (and
+  `parrot-blackbox restore urgent`) restores it into a folder of your choice.
+- **List** — urgent artifacts are shown alongside file backups in both the
+  wizard and `parrot-blackbox list`.
+
+### Changed — collection walker hardens bare-file & special sources
+
+- `collectFiles` now backs up **bare file sources** verbatim (e.g.
+  `~/.gitconfig`) and cleanly skips sockets/FIFOs/devices (e.g. `~/.ssh/agent`
+  sockets) instead of treating them as copyable files.
+
+## [2.0.9] - 2026-09-03
+
+### Fixed — silent full-baseline uploads, and stale sessions after self-update
+
+- **A FULL baseline BTRFS send could be kicked off with zero warning.** When no
+  previously-uploaded snapshot exists (e.g. the last snapshot was just deleted,
+  or this is the first backup), `btrfs send -p <parent>` is impossible — the
+  parent subvolume must exist on disk, so the tool correctly fell back to a full
+  send, but it looked like an unexplained ~25 GiB upload. Now:
+  - The menu wizard **confirms before creating** a snapshot when
+    `nextSnapshotUploadMode()` reports a full baseline:
+    `"⚠ No previous snapshot found — this will be a FULL baseline upload of the
+    ENTIRE system…"` (both "📸 Create snapshot" and "💾 Run all backups").
+  - **"🗑  Delete snapshots"** warns that deleting the last snapshot makes the
+    next backup a full baseline upload before the destructive confirm.
+  - The upload path itself prints a prominent yellow warning before a full
+    `btrfs send`, so CLI (`snapshot now` / `force`) and daemon runs are never
+    silent about it either.
+  - New exported `nextSnapshotUploadMode({ cfg, privileged, localSnaps,
+    manifestsDirOverride })` helper in `src/backup/snapshot.js` — a lightweight
+    probe (list local snapshots + read manifests, never creates anything) used
+    by the wizard; unit-tested.
+- **Running inside a stale session after an in-wizard update made uploads look
+  completely silent.** `npm install -g` was executed but the already-loaded
+  process kept running the OLD code (v2.0.6 has no upload progress at all —
+  v2.0.7/2.0.8 added it), exactly what happened in the reported session where
+  the repair said "Updated to v2.0.7. Restart parrot-blackbox…" and the menu
+  continued with the old process anyway. Now:
+  - The wizard tracks in-session updates (`autoUpdateCheck`, the "⬆️  Update"
+    action, and 🛠  Repair which now returns `{ updated }`) and shows a warning
+    when returning to the menu: this process still runs the OLD code — exit and
+    re-run `parrot-blackbox` to use the new version.
+- Gentle reminder: an incremental upload requires the parent snapshot to be
+  present **right now** on disk. Deleting all snapshots (or an interrupted
+  first upload) always resets the chain to one full baseline — that's inherent
+  to `btrfs send -p`, not a bug.
+
 ## [2.0.8] - 2026-09-03
 
 ### Fixed — progress bar not visible inside the wizard menu

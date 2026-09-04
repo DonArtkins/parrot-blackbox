@@ -22,16 +22,15 @@ import { listLocalSnapshots } from './snapshot.js';
 import { ensureSudo, sudoInteractive } from '../util/sudo.js';
 import { bytesHuman } from '../util/misc.js';
 
-/** Restore a file backup generation into a writable local directory. */
-export async function restoreFiles({ id, toDir, accounts, cfg, onProgress }) {
-  const found = await discoverManifest('files', id, accounts, cfg.storage.remoteRoot);
+/** Restore a file-backup generation (or an urgent backup) into a writable local directory. */
+export async function restoreFiles({ id, toDir, accounts, cfg, kind = 'files', onProgress }) {
+  const found = await discoverManifest(kind, id, accounts, cfg.storage.remoteRoot);
   if (!found) {
-    // Fall back to scanning every account for the artifact id.
-    throw new Error(`no file backup found for id "${id}" — check with \`parrot-blackbox list\``);
+    throw new Error(`no ${kind} backup found for id "${id}" — check with \`parrot-blackbox list\``);
   }
   fs.mkdirSync(toDir, { recursive: true });
   const res = await restoreArtifact(found.manifest, toDir, { onProgress });
-  journal('restore', `files id=${id} -> ${toDir} files=${res.files} bytes=${res.bytes}`);
+  journal('restore', `${kind} id=${id} -> ${toDir} files=${res.files} bytes=${res.bytes}`);
   return { id, toDir, ...res, manifest: found.manifest };
 }
 

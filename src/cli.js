@@ -14,6 +14,7 @@ import { installService, removeService } from './commands/service.js';
 import { runDueJobs } from './daemon/scheduler.js';
 import { startDaemon, stopDaemon, daemonRunning } from './daemon/daemon.js';
 import { runSnapshotNow, listLocalSnapshots, pruneSnapshots, deleteSnapshot, deleteAllSnapshots } from './backup/snapshot.js';
+import { runUrgentBackup } from './backup/urgent.js';
 import { restoreSnapshot, restoreFiles } from './backup/restore.js';
 import { listAccounts, addAccount, removeAccount, refreshAccounts, poolSummary } from './storage/accounts.js';
 import { listArtifacts } from './storage/archive.js';
@@ -52,6 +53,7 @@ ${pc.bold('Usage:')}
   parrot-blackbox snapshot list       List local & cloud snapshots
   parrot-blackbox snapshot delete [<name>|--all]  Delete one or all local snapshots  ${pc.dim('[sudo]')}
   parrot-blackbox snapshot prune      Delete snapshots beyond the keep limit  ${pc.dim('[sudo]')}
+  parrot-blackbox urgent              ⚡ One-off rescue backup: working files + VS Codium + gitswitch/SSH data
   parrot-blackbox list [files]        List cloud file backups
   parrot-blackbox restore             Restore a snapshot or file backup       ${pc.dim('[sudo]')}
   parrot-blackbox account add         Add a MEGA / Google Drive account (remote must already exist)
@@ -132,6 +134,12 @@ async function listFiles() {
   for (const a of artifacts) {
     console.log(`  - ${pc.cyan(a.id)}  ${bytesHuman(a.totalSize)}  ${pc.dim(a.account)}`);
   }
+  const urgent = await listArtifacts('urgent', accs, cfg.storage.remoteRoot);
+  console.log(`\n${pc.bold('Cloud urgent backups:')}`);
+  if (urgent.length === 0) console.log(`  ${pc.dim('none yet — run `parrot-blackbox urgent`')}`);
+  for (const a of urgent) {
+    console.log(`  - ${pc.cyan(a.id)}  ${bytesHuman(a.totalSize)}  ${pc.dim(a.account)}`);
+  }
   console.log();
 }
 
@@ -162,13 +170,14 @@ async function restoreFlow(rest) {
     options: [
       { value: 'snapshot', label: 'System snapshot (Timeshift) — overwrites the whole system', hint: '[sudo]' },
       { value: 'files', label: 'File backup — recover fonts/images/docs into a folder' },
+      { value: 'urgent', label: 'Urgent backup — user files + tool profiles (fresh install)' },
     ],
   }));
   if (p.isCancel(kind)) return;
 
-  if (kind === 'files') {
-    const artifacts = await listArtifacts('files', accs, cfg.storage.remoteRoot);
-    if (artifacts.length === 0) { p.log.warn('No file backups found.'); return; }
+  if (kind === 'files' || kind === 'urgent') {
+    const artifacts = await listArtifacts(kind, accs, cfg.storage.remoteRoot);
+    if (artifacts.length === 0) { p.log.warn(`No ${kind === 'urgent' ? 'urgent' : 'file'} backups found.`); return; }
     const id = rest[1] || (await p.select({
       message: 'Pick a backup generation:',
       options: artifacts.map((a) => ({ value: a.id, label: `${a.id}  (${bytesHuman(a.totalSize)})` })),
@@ -181,7 +190,7 @@ async function restoreFlow(rest) {
     const s = p.spinner();
     s.start('Restoring…');
     try {
-      const res = await restoreFiles({ id, toDir, accounts: accs, cfg });
+      const res = await restoreFiles({ id, toDir, accounts: accs, cfg, kind });
       s.stop(`✔ Restored ${res.files} file(s), ${bytesHuman(res.bytes)} into ${toDir}`);
     } catch (e) {
       s.stop('✖ Restore failed.');
@@ -404,6 +413,23 @@ const main = defineCommand({
             console.log(`${pc.red('✖')} Backup failed: ${r.error}`);
             process.exitCode = 1;
           }
+        }
+        return;
+      }
+
+      case 'urgent': {
+        // One-off rescue backup — working files + VS Codium + gitswitch/SSH data.
+        const progress = makeProgressRenderer();
+        try {
+          const r = await runUrgentBackup(undefined, undefined, { onProgress: progress });
+          progress.stop();
+          console.log(`${pc.green('✔')} Urgent backup ${r.resumed ? 'resumed & ' : ''}stored (${bytesHuman(r.sizeBytes)}). Restore with: \`parrot-blackbox restore urgent\`.`);
+          if (r.skippedRepos?.length) console.log(pc.dim(`Skipped ${r.skippedRepos.length} git-tracked folder(s).`));
+          if (r.missing?.length) console.log(pc.dim(`Source(s) not present, skipped: ${r.missing.join(', ')}.`));
+        } catch (e) {
+          progress.stop();
+          console.error(pc.red(`✖ ${e.message}`));
+          process.exitCode = 1;
         }
         return;
       }

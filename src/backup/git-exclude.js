@@ -49,7 +49,21 @@ export function collectFiles(sources, { exclude = [], home = process.env.HOME } 
 
   for (const src of sources) {
     const abs = expandPath(src, home);
-    if (!fs.existsSync(abs)) {
+    let st;
+    try {
+      st = fs.statSync(abs); // throws → source is missing
+    } catch {
+      missing.push(src);
+      continue;
+    }
+
+    // A bare FILE source (e.g. `~/.gitconfig`) is backed up verbatim.
+    if (st.isFile()) {
+      files.push({ abs, rel: path.basename(abs) || 'file' });
+      continue;
+    }
+    // Sockets / FIFOs / devices aren't copyable as sources — skip cleanly.
+    if (!st.isDirectory()) {
       missing.push(src);
       continue;
     }
@@ -91,9 +105,10 @@ export function collectFiles(sources, { exclude = [], home = process.env.HOME } 
           continue;
         }
         walk(eAbs, rel, sourceRoot);
-      } else {
+      } else if (st.isFile()) {
         files.push({ abs: eAbs, rel });
       }
+      // sockets / FIFOs / devices can't be copied — silently skipped.
     }
   }
 

@@ -65,7 +65,11 @@ export function walkFiles(localDir) {
  *      will Google Drive accounts be used.
  *   2. Within each provider tier the classic water-filling strategy applies:
  *      pick the account that results in the lowest used-percentage after
- *      placing the file (most headroom wins on ties).
+ *      placing the file. Accounts that are within ~0.5% of quota from each
+ *      other are treated as equally full, and the account EARLIEST in the
+ *      configured pool order wins the tie — so an all-empty pool fills in
+ *      account order (mega-1, mega-2, …) instead of chasing `rclone about`
+ *      usage noise.
  */
 export function chooseAccount(needed, accounts) {
   // Tier 0 = mega, Tier 1 = gdrive / everything else.
@@ -79,14 +83,26 @@ export function chooseAccount(needed, accounts) {
   const candidates = eligible.filter((a) => providerTier(a) === bestTier);
 
   // Water-fill within the chosen tier: minimise resulting used-percentage.
+  // SCORE_EPS absorbs `rclone about` usage noise — MEGA inconsistently reports
+  // a few bytes to tens-of-MiB of phantom usage on otherwise-empty accounts.
+  // As long as accounts are effectively equally full, files go onto the account
+  // EARLIEST in the configured pool order.
+  const SCORE_EPS = 0.005; // 0.5 percentage points of quota
   let best = null;
   let bestScore = Infinity;
-  for (const acc of candidates) {
+  let bestIdx = Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    const acc = candidates[i];
     const quota = acc.total || 0;
     const score = quota ? (acc.used + needed) / quota : needed;
-    if (score < bestScore || (score === bestScore && acc.free > (best?.free ?? -1))) {
+    if (score < bestScore - SCORE_EPS) {
       bestScore = score;
       best = acc;
+      bestIdx = i;
+    } else if (Math.abs(score - bestScore) <= SCORE_EPS && i < bestIdx) {
+      // Effectively a tie → the earlier account in the pool wins.
+      best = acc;
+      bestIdx = i;
     }
   }
   return best;
@@ -122,12 +138,12 @@ export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, c
     entries: [],
   };
 
-  const report = (done, text) => {
-    if (typeof onProgress === 'function') onProgress({ done, total: files.length, text });
+  const emit = (done, text, remote) => {
+    if (typeof onProgress === 'function') onProgress({ done, total: totalSize, text, remote });
   };
 
   // PASS 1: Planning
-  report(0, 'planning allocations...');
+  emit(0, 'planning allocations...');
   const batches = new Map(); // account.remote -> array of relative paths
   const splits = []; // files that need splitting
 
@@ -162,24 +178,30 @@ export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, c
 
   // PASS 2: Batch Uploading (Sequential accounts, but parallel files inside rclone)
   const batchDir = process.env.PBB_STATE_DIR || '/tmp';
-  let placed = 0;
-  
+  const fileSizes = new Map(files.map((f) => [f.rel, f.size]));
+  const batchBytes = (rels) => rels.reduce((s, r) => s + (fileSizes.get(r) ?? 0), 0);
+  let placedBytes = 0;
+
   for (const [remote, batch] of batches.entries()) {
     if (batch.files.length === 0) continue;
     const batchPath = path.join(batchDir, `batch-${remote.replace(/[^a-z0-9]/gi, '_')}-${Date.now()}.txt`);
     fs.writeFileSync(batchPath, batch.files.join('\n') + '\n');
-    
+
     // Ensure the remote directory exists to prevent "directory not found" errors
     // when rclone tries to list the destination for --files-from checking.
     await mkdirRemote(`${remote}:${basePath}`);
-    
-    report(placed, `uploading batch of ${batch.files.length} files to ${remote}...`);
-    const res = await copyBatch(localDir, `${remote}:${basePath}`, batchPath);
+
+    const thisBatchBytes = batchBytes(batch.files);
+    const label = `uploading ${batch.files.length} file(s) → ${remote}`;
+    emit(placedBytes, label, remote);
+    const res = await copyBatch(localDir, `${remote}:${basePath}`, batchPath, {
+      onProgress: (p) => emit(placedBytes + p.done, label, remote),
+    });
     if (!res.ok) throw new Error(`batch upload failed to ${remote}: ${res.error}`);
-    
+
     fs.unlinkSync(batchPath);
-    placed += batch.files.length;
-    report(placed, `placed ${placed}/${files.length}`);
+    placedBytes += thisBatchBytes;
+    emit(placedBytes, `uploaded ${bytesHuman(placedBytes)}`, remote);
   }
 
   // PASS 3: Split large files
@@ -189,27 +211,27 @@ export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, c
     const locs = [];
     let start = 0;
     let partIndex = 0;
-    
-    report(placed, `splitting huge file ${rel}...`);
+
+    emit(placedBytes, `splitting huge file ${rel}...`);
     while (start < entry.size) {
       const len = Math.min(chunkSize, entry.size - start);
       const acc = chooseAccount(len, pool);
       if (!acc) throw outOfSpace();
-      
+
       const partAbs = await makePartFile(entry, start, len);
       const partPath = `${destPath}.part-${String(partIndex).padStart(4, '0')}`;
-      
+
       const res = await copyToFile(partAbs, `${acc.remote}:${partPath}`);
       if (!res.ok) throw new Error(`upload failed for ${rel} part on ${acc.remote}: ${res.error}`);
-      
+
       consume(acc, len);
       locs.push({ remote: acc.remote, path: partPath, start, end: start + len, size: len });
       start += len;
       partIndex += 1;
+      placedBytes += len;
+      emit(placedBytes, `uploaded ${bytesHuman(placedBytes)}`, acc.remote);
     }
     manifest.entries.push({ rel, type: 'file', size: entry.size, split: true, loc: locs });
-    placed += 1;
-    report(placed, `placed ${placed}/${files.length}`);
   }
 
   // Manifest: cloud + local mirror.

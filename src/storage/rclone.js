@@ -64,24 +64,65 @@ export async function copyDir(localDir, remotePath) {
 }
 
 /** Copy a single local file to an exact remote path. */
-export async function copyToFile(localFile, remotePath, { ignoreExisting = false } = {}) {
+export async function copyToFile(localFile, remotePath, { ignoreExisting = false, force = false } = {}) {
   const args = ['copyto', localFile, remotePath];
   if (ignoreExisting) args.push('--ignore-existing');
+  if (force) args.push('--ignore-times'); // overwrite even a "newer" destination
   const res = await rejectFalse(args);
   return { ok: res.exitCode === 0, exitCode: res.exitCode, error: res.stderr?.trim() };
 }
 
-/** Copy a batch of files using --files-from. */
-export async function copyBatch(localDir, remotePath, filesFromPath) {
+/** Copy a batch of files using --files-from. When `onProgress` is supplied we
+ *  ask rclone for live transfer stats and parse its `Transferred: X / Y` frames
+ *  so the caller receives byte-level progress as `{ done, total }` (bytes). */
+export async function copyBatch(localDir, remotePath, filesFromPath, { onProgress } = {}) {
   const args = [
     'copy', localDir, remotePath,
     '--files-from', filesFromPath,
     '--transfers=16',
     '--checkers=16',
-    '--fast-list'
+    '--fast-list',
   ];
-  const res = await rejectFalse(args);
+  if (typeof onProgress === 'function') {
+    // rclone emits periodic frames even when stdout is not a TTY (pipelines).
+    args.push('--progress', '--stats=1s');
+  }
+  const child = rejectFalse(args);
+  if (typeof onProgress === 'function') {
+    await consumeProgress(child, onProgress);
+  }
+  const res = await child;
   return { ok: res.exitCode === 0, exitCode: res.exitCode, error: res.stderr?.trim() };
+}
+
+/** Consume rclone's --progress stdout, emitting parsed byte counts per frame. */
+async function consumeProgress(child, onProgress) {
+  let buf = '';
+  for await (const chunk of child.stdout) {
+    buf += chunk;
+    const frames = buf.split(/[\r\n]+/);
+    buf = frames.pop(); // keep a partial trailing frame for the next chunk
+    for (const frame of frames) {
+      const p = parseTransferFrame(frame);
+      if (p) onProgress(p);
+    }
+  }
+  const tail = parseTransferFrame(buf);
+  if (tail) onProgress(tail);
+}
+
+/**
+ * Extract the BYTE `Transferred: <done> / <total>` from an rclone progress
+ * frame. This deliberately requires a size unit (KiB/MiB/GiB/…) so the separate
+ * FILE-count `Transferred: 3 / 5` line is never mistaken for bytes.
+ * @returns {{done:number,total:number}|null}
+ */
+export function parseTransferFrame(frame) {
+  const m = /\bTransferred:\s+([\d.]+\s*(?:[kmgt]i?)?b)\s*\/\s*([\d.]+\s*(?:[kmgt]i?)?b)/i.exec(frame);
+  if (!m) return null;
+  const done = parseBytes(m[1]);
+  const total = parseBytes(m[2]);
+  return done !== null && total !== null ? { done, total } : null;
 }
 
 /** Download a batch of files using --files-from (reverse of copyBatch). */
@@ -91,7 +132,12 @@ export async function downloadBatch(remotePath, localDir, filesFromPath) {
     '--files-from', filesFromPath,
     '--transfers=16',
     '--checkers=16',
-    '--fast-list'
+    '--fast-list',
+    // Restore MUST reproduce the artifact exactly. rclone's default skips a
+    // destination file whose mtime looks newer (exactly what fresh-install
+    // default files are), which silently leaves "conflicts" — your backed-up
+    // version never comes back. --ignore-times forces the overwrite.
+    '--ignore-times',
   ];
   const res = await rejectFalse(args);
   return { ok: res.exitCode === 0, exitCode: res.exitCode, error: res.stderr?.trim() };

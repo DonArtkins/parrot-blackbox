@@ -231,6 +231,7 @@ export async function runRepair({ auto = false } = {}) {
   }
 
   // 5. Optional npm reinstall (repair a broken CLI install)
+  let updated = false;
   if (!auto) {
     const want = await p.confirm({
       message: 'Reinstall parrot-blackbox from npm to repair the executable?',
@@ -239,10 +240,11 @@ export async function runRepair({ auto = false } = {}) {
     if (!p.isCancel(want) && want) {
       const { runSelfUpdate } = await import('../lib/self.js');
       p.log.step('Reinstalling from npm…');
-      const did = await runSelfUpdate({ force: true });
-      if (did) fixed.push('npm');
+      updated = await runSelfUpdate({ force: true });
+      if (updated) fixed.push('npm');
     }
   }
 
   p.outro(pc.green(fixed.length ? `Repair complete — fixed: ${fixed.join(', ')}.` : 'Nothing to repair — everything looks healthy.'));
+  return { updated };
 }

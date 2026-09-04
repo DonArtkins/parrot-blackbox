@@ -150,7 +150,7 @@ export async function restoreArtifact(manifest, destDir, { onProgress } = {}) {
       for (const entry of batch.entries) {
         const target = path.join(destDir, ...entry.rel.split('/'));
         const loc = entry.loc[0];
-        const r = await copyToFile(`${loc.remote}:${loc.path}`, target);
+        const r = await copyToFile(`${loc.remote}:${loc.path}`, target, { force: true });
         if (!r.ok) throw new Error(`download failed for ${entry.rel}: ${r.error}`);
         files += 1;
         bytes += entry.size;

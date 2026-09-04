@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execa, execaSync } from 'execa';
+import pc from 'picocolors';
 import { loadConfig, loadState, saveState, journal, hasCommandSync } from '../core/store.js';
 import { timeshiftDir, stateDir, configFile, manifestsDir } from '../core/paths.js';
 import { iso, clock } from '../core/time.js';
@@ -589,6 +590,15 @@ async function uploadViaBtrfsSend({ snapshot, subvolPath, parentSnapshot, parent
   const estimatedSize = await estimateSendSize(subvolPath, { parent: parentSubvolPath });
   const btrfsCfg = cfg.jobs.snapshots.btrfs || {};
 
+  // A missing parent means this is the unavoidable FULL baseline: `btrfs send -p`
+  // needs the parent subvolume to exist on disk, so there is no smaller option.
+  // Say so loudly BEFORE the upload starts — the wizard also confirmation-gates it.
+  if (!parentSubvolPath) {
+    console.log(pc.yellow('⚠  No parent snapshot available — this is a FULL baseline upload of the entire system subvolume.'));
+    console.log(pc.yellow(`   Estimated ${(estimatedSize / (1024 ** 3)).toFixed(1)} GiB raw — on a typical uplink this can take hours.`));
+    console.log(pc.yellow('   Once a snapshot is fully uploaded and kept, subsequent backups become small increments.'));
+  }
+
   console.log(`\n📤 Uploading ${parentSubvolPath ? 'incremental' : 'full'} BTRFS stream...`);
   console.log(`   Estimated size: ${(estimatedSize / (1024 ** 3)).toFixed(2)} GiB`);
   if (btrfsCfg.compression !== false) console.log(`   Compression: zstd enabled`);
@@ -832,6 +842,38 @@ export async function pruneSnapshots(cfg, accounts, { privileged = 'noninteracti
 export async function runSnapshotNow(cfg = loadConfig(), state = loadState(), opts = {}) {
   const due = iso(clock());
   return runSnapshotBackup(cfg, state, { due, privileged: 'interactive', ...opts });
+}
+
+/**
+ * Decide whether the NEXT snapshot upload would be a small incremental (a
+ * fully-uploaded parent snapshot still exists on disk) or a FULL baseline send.
+ *
+ * Lightweight probe — it only lists local snapshots and reads local manifests;
+ * it never creates anything.  The wizard uses this to warn and confirm BEFORE
+ * a multi-hour full baseline upload is kicked off.
+ *
+ * @param {object} opts
+ * @param {object} [opts.cfg]                  config object (defaults to on-disk config)
+ * @param {'interactive'|'noninteractive'} [opts.privileged]
+ * @param {Array|null} [opts.localSnaps]         injectable snapshot list (tests)
+ * @param {string|null} [opts.manifestsDirOverride]  injectable manifests dir (tests)
+ * @returns {Promise<{full: boolean, parent: string|null, reason: string|null}>}
+ */
+export async function nextSnapshotUploadMode({ cfg = loadConfig(), privileged = 'noninteractive', localSnaps = null, manifestsDirOverride = null } = {}) {
+  const btrfsCfg = cfg?.jobs?.snapshots?.btrfs || {};
+  if (btrfsCfg.enabled === false || process.env.PBB_DISABLE_BTRFS) {
+    return { full: false, parent: null, reason: 'BTRFS streaming disabled — file-copy mode in use' };
+  }
+  if (btrfsCfg.incremental === false) {
+    return { full: false, parent: null, reason: 'incremental uploads disabled in config (full sends are intentional)' };
+  }
+
+  const snaps = localSnaps ?? (await listLocalSnapshots({ privileged }).catch(() => []));
+  const { findLastUploadedSnapshot } = await import('./btrfs-send.js');
+  const parent = findLastUploadedSnapshot(manifestsDirOverride || manifestsDir(), snaps);
+  return parent
+    ? { full: false, parent, reason: null }
+    : { full: true, parent: null, reason: 'no fully-uploaded parent snapshot on disk' };
 }
 
 export function timeshiftAvailable() {
