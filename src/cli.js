@@ -190,13 +190,20 @@ async function restoreFlow(rest) {
     if (p.isCancel(id)) return;
     const toDir = rest[2] || (await p.text({
       message: 'Restore to which directory?',
-      initialValue: `./restored-${id}`,
+      // Urgent backups restore your home (Desktop, .ssh, .gitconfig, …) — an
+      // identical machine reports "nothing changed", a fresh install overwrites.
+      initialValue: kind === 'urgent' ? (process.env.HOME || `./restored-${id}`) : `./restored-${id}`,
     }));
     const s = p.spinner();
     s.start('Restoring…');
     try {
       const res = await restoreFiles({ id, toDir, accounts: accs, cfg, kind });
-      s.stop(`✔ Restored ${res.files} file(s), ${bytesHuman(res.bytes)} into ${toDir}`);
+      if (res.identical) {
+        s.stop(`✔ Nothing to restore — ${kind} backup already matches ${toDir} (${res.unchanged} file(s) identical).`);
+      } else {
+        const skip = res.unchanged ? `  (${res.unchanged} already up-to-date)` : '';
+        s.stop(`✔ Restored ${res.files} file(s), ${bytesHuman(res.bytes)} into ${toDir}${skip}`);
+      }
     } catch (e) {
       s.stop('✖ Restore failed.');
       p.log.warn(e.message);

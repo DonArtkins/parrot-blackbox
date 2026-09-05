@@ -472,6 +472,37 @@ test('restore snapshot: downloads cloud snapshot & hands to timeshift --restore'
   assert.equal(accept.exitCode, 0, accept.stdout.substring(0, 500));
   assert.ok(/Restoring|restore/i.test(accept.stdout), accept.stdout);
 });
+test('restore urgent: identical local state → nothing to restore; a changed file is overwritten from cloud', async () => {
+  const s = setupSandbox('urgentdiff');
+  populateHome(s);
+  addRemote(s.env, { remote: 'megaDf', quotaGiB: 30 });
+  const add = await runCli(['account', 'add', 'mega', 'megaDf'], s.env);
+  assert.equal(add.exitCode, 0, add.stdout + add.stderr);
+
+  const up = await runCli(['urgent'], s.env);
+  assert.equal(up.exitCode, 0, up.stdout + up.stderr);
+  const mf = fs.readdirSync(path.join(s.env.PBB_STATE_DIR, 'manifests'))
+    .find((f) => f.startsWith('urgent-'));
+  const id = mf.slice('urgent-'.length, -'.json'.length);
+  const wallPath = path.join(s.home, 'Desktop', 'wallpaper.png');
+  const original = fs.readFileSync(wallPath, 'utf8');
+
+  // 1) Same machine, nothing changed → restore reports nothing to restore.
+  const same = await runCli(['restore', 'urgent', id, s.home], s.env);
+  assert.equal(same.exitCode, 0, same.stdout + same.stderr);
+  assert.ok(/Nothing to restore/i.test(same.stdout + same.stderr), `expected nothing-to-restore:\n${same.stdout + same.stderr}`);
+
+  // 2) Now a single local change: different size + different mtime.
+  fs.writeFileSync(wallPath, 'CORRUPTED-DIFFERENT-CONTENT!!!');
+  const future = new Date(Date.now() + 60_000);
+  fs.utimesSync(wallPath, future, future);
+
+  const change = await runCli(['restore', 'urgent', id, s.home], s.env);
+  assert.equal(change.exitCode, 0, change.stdout + change.stderr);
+  assert.equal(fs.readFileSync(wallPath, 'utf8'), original,
+    'changed local file was overwritten with the cloud backup version');
+});
+
 test('urgent backup is recognized by `list files` (cloud urgent section)', async () => {
   const s = setupSandbox('urgentlist');
   populateHome(s);

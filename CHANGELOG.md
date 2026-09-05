@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.2.2] - 2026-09-05
+
+### Added — smart diff-aware restore (snapshot & urgent/files)
+
+- **Restore now compares the backup against what's already on disk and only
+  transfers what differs.**
+- **Urgent / file restore:** every file in the manifest is diffed locally by
+  **size + mtime** (mtime is now recorded in the manifest at upload time; older
+  backups fall back to size-only). Restoring on the **same machine where nothing
+  changed** reports **"✔ Nothing to restore — backup already matches (N file(s)
+  identical)"** and touches nothing. If even **one file** differs (missing,
+  different size, or different mtime), it is restored and **overwritten with the
+  cloud version** while every identical file is skipped — so a **fresh install**
+  still gets a full, overwriting restore. Undersized/split-file restores set the
+  mtime from the manifest so a repeated restore stays "identical".
+- **Urgent restore now defaults to your home directory** (`~`), because urgent
+  backups hold `Desktop/`, `.ssh`, `.gitconfig`, etc. Same machine → "nothing to
+  restore". Fresh install → everything lands in place and overwrites the
+  defaults.
+- **Snapshot restore:** when the snapshot (and its whole incremental chain) is
+  already present locally, the tool says so clearly and warns that on an
+  unchanged machine it is effectively a no-op (Timeshift still overwrites the
+  running system) — while on a fresh install that's exactly the recovery you
+  want.
+- New tests: unit (`planRestoreDiff`, `walkFiles` mtime recording) and an e2e
+  proving same-machine restore reports nothing-to-restore and a single changed
+  file is overwritten from the cloud.
+
 ## [2.2.1] - 2026-09-05
 
 ### Fixed — cloud listings were silently empty on real rclone (restore found nothing)

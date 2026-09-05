@@ -88,6 +88,15 @@ export async function restoreArtifact(manifest, destDir, { onProgress } = {}) {
   let bytes = 0;
   const entries = manifest.entries || [];
 
+  // ── Step 0: Smart diff — restore ONLY what differs. If everything already
+  // matches the backup locally, report "nothing changed" and touch NOTHING
+  // (no re-download, no re-copy, no overwrite). A file needs restoring when it
+  // is missing, has a different size, or a meaningfully different mtime.
+  const { unchanged, toRestore } = planRestoreDiff(manifest, destDir);
+  if (toRestore.length === 0) {
+    return { files: 0, bytes: 0, unchanged: unchanged.length, changed: 0, identical: true };
+  }
+
   // ── Step 1: Create all directories up-front ──
   for (const entry of entries) {
     const target = path.join(destDir, ...entry.rel.split('/'));
@@ -98,11 +107,11 @@ export async function restoreArtifact(manifest, destDir, { onProgress } = {}) {
     }
   }
 
-  // ── Step 2: Separate whole files (batchable) from split files ──
+  // ── Step 2: Separate changed whole files (batchable) from changed splits ──
   const wholeFiles = [];    // single-location entries → batched download
   const splitFiles = [];    // multi-location entries → streaming reassembly
 
-  for (const entry of entries) {
+  for (const entry of toRestore) {
     if (entry.type === 'dir') continue;
     if (entry.loc.length === 1) {
       wholeFiles.push(entry);
@@ -155,12 +164,15 @@ export async function restoreArtifact(manifest, destDir, { onProgress } = {}) {
         const loc = entry.loc[0];
         const r = await copyToFile(`${loc.remote}:${loc.path}`, target, { force: true });
         if (!r.ok) throw new Error(`download failed for ${entry.rel}: ${r.error}`);
+        touchToEntry(target, entry);
         files += 1;
         bytes += entry.size;
         if (typeof onProgress === 'function') onProgress({ done: files, text: `restored ${entry.rel}` });
       }
     } else {
       for (const entry of batch.entries) {
+        const target = path.join(destDir, ...entry.rel.split('/'));
+        touchToEntry(target, entry);
         files += 1;
         bytes += entry.size;
         if (typeof onProgress === 'function') onProgress({ done: files, text: `restored ${entry.rel}` });
@@ -187,12 +199,52 @@ export async function restoreArtifact(manifest, destDir, { onProgress } = {}) {
       await streams.finished(out);
     }
     fs.renameSync(partAbs, target);
+    touchToEntry(target, entry);
     files += 1;
     bytes += entry.size;
     if (typeof onProgress === 'function') onProgress({ done: files, text: `restored ${entry.rel}` });
   }
 
-  return { files, bytes };
+  return { files, bytes, unchanged: unchanged.length, changed: toRestore.length, identical: false };
+}
+
+/**
+ * Compare a manifest's file entries against what already exists under destDir.
+ * A file needs restoring when it is missing locally, has a different size, or
+ * has a mtime more than ~2s away from the mtime recorded in the manifest
+ * (backups made before mtime recording simply fall back to size-only).
+ * @returns {{ unchanged: Array, toRestore: Array }}
+ */
+export function planRestoreDiff(manifest, destDir) {
+  const MTIME_TOLERANCE_MS = 2000;
+  const unchanged = [];
+  const toRestore = [];
+  for (const entry of (manifest.entries || [])) {
+    if (entry.type === 'dir') continue;
+    const target = path.join(destDir, ...entry.rel.split('/'));
+    let st = null;
+    try {
+      st = fs.statSync(target);
+    } catch {
+      st = null;
+    }
+    if (!st) { toRestore.push(entry); continue; }
+    if (st.size !== entry.size) { toRestore.push(entry); continue; }
+    if (entry.mtimeMs && Math.abs(st.mtimeMs - entry.mtimeMs) > MTIME_TOLERANCE_MS) { toRestore.push(entry); continue; }
+    unchanged.push(entry);
+  }
+  return { unchanged, toRestore };
+}
+
+/** Restore mtime from the manifest so a later diff reports the file identical. */
+function touchToEntry(target, entry) {
+  if (!entry.mtimeMs) return;
+  try {
+    const t = entry.mtimeMs / 1000;
+    fs.utimesSync(target, t, t);
+  } catch {
+    /* best effort */
+  }
 }
 
 /** Purge an artifact from every account that hosts it (+ local mirror). */

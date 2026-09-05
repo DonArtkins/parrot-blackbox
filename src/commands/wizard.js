@@ -355,12 +355,22 @@ async function restoreFileLike(kind, accs, cfg) {
     options: artifacts.map((a) => ({ value: a.id, label: `${a.id}  (${bytesHuman(a.totalSize)})` })).concat([{ value: '__back', label: '← Back' }]),
   });
   if (p.isCancel(id) || id === '__back') return;
-  const toDir = await p.text({ message: 'Restore into which directory?', initialValue: `./restored-${id}` });
+  const toDir = await p.text({
+    message: 'Restore into which directory?',
+    // Urgent backups restore your home (Desktop, .ssh, .gitconfig, …) — an
+    // identical machine reports "nothing changed", a fresh install overwrites.
+    initialValue: kind === 'urgent' ? (process.env.HOME || `./restored-${id}`) : `./restored-${id}`,
+  });
   if (p.isCancel(toDir) || !toDir) return;
   fs.mkdirSync(toDir, { recursive: true });
   try {
     const res = await restoreFiles({ id, toDir, accounts: accs, cfg, kind });
-    p.log.success(`✔ Restored ${res.files} file(s), ${bytesHuman(res.bytes)} into ${toDir}`);
+    if (res.identical) {
+      p.log.success(`✔ Nothing to restore — ${kind} backup already matches ${toDir} (${res.unchanged} file(s) identical).`);
+    } else {
+      const skip = res.unchanged ? `  (${res.unchanged} already up-to-date)` : '';
+      p.log.success(`✔ Restored ${res.files} file(s), ${bytesHuman(res.bytes)} into ${toDir}${skip}`);
+    }
   } catch (e) {
     p.log.warn(`✖ ${e.message}`);
   }

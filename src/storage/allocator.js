@@ -30,7 +30,7 @@ export { bytesHuman };
 export const GiB = 1024 ** 3;
 export const MANIFEST_NAME = '__MANIFEST__.json';
 
-/** Walk a dir tree returning [{rel, abs, size, isDir}]. Symlinks skipped. */
+/** Walk a dir tree returning [{rel, abs, size, isDir, mtimeMs}]. Symlinks skipped. */
 export function walkFiles(localDir) {
   const out = [];
   const base = path.resolve(localDir);
@@ -46,10 +46,10 @@ export function walkFiles(localDir) {
       }
       if (ent.isSymbolicLink()) continue;
       if (ent.isDirectory()) {
-        out.push({ rel: eRel, abs: eAbs, isDir: true, size: 0 });
+        out.push({ rel: eRel, abs: eAbs, isDir: true, size: 0, mtimeMs: st.mtimeMs });
         rec(eAbs, eRel);
       } else {
-        out.push({ rel: eRel, abs: eAbs, isDir: false, size: st.size });
+        out.push({ rel: eRel, abs: eAbs, isDir: false, size: st.size, mtimeMs: st.mtimeMs });
       }
     }
   }
@@ -170,6 +170,7 @@ export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, c
         rel: entry.rel,
         type: 'file',
         size: entry.size,
+        mtimeMs: entry.mtimeMs,
         loc: [{ remote: acc.remote, path: `${basePath}/${entry.rel}`, start: 0, end: entry.size, size: entry.size }],
       });
     } else {
@@ -232,7 +233,7 @@ export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, c
       placedBytes += len;
       emit(placedBytes, `uploaded ${bytesHuman(placedBytes)}`, acc.remote);
     }
-    manifest.entries.push({ rel, type: 'file', size: entry.size, split: true, loc: locs });
+    manifest.entries.push({ rel, type: 'file', size: entry.size, mtimeMs: entry.mtimeMs, split: true, loc: locs });
   }
 
   // Manifest: cloud + local mirror.

@@ -440,6 +440,58 @@ test('manifest mirror resolves to the canonical state dir, never CWD ./manifests
   }
 });
 
+test('planRestoreDiff skips identical files, flags missing / size-changed / mtime-changed', async () => {
+  const { planRestoreDiff } = await import('../src/storage/archive.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pbb-diff-'));
+  const t = Date.now() - 100000; // fixed past mtime (ms)
+  try {
+    const write = (name, content, mtimeMs) => {
+      const p = path.join(dir, name);
+      fs.writeFileSync(p, content);
+      if (mtimeMs) fs.utimesSync(p, mtimeMs / 1000, mtimeMs / 1000);
+      return p;
+    };
+    write('ok.txt', 'hello', t);
+    // bigger.txt has size 10 (cloud says 500 → size mismatch)
+    write('bigger.txt', '1234567890', t);
+    // touched.txt same size as ok.txt but mtime is 100s older → mismatch
+    write('touched.txt', 'hello', t - 100000);
+    // legacy.txt same size, no recorded mtime (old manifest) → treated unchanged
+    write('legacy.txt', 'hello', t);
+
+    const manifest = {
+      entries: [
+        { rel: 'ok.txt', type: 'file', size: 5, mtimeMs: t },
+        { rel: 'missing.txt', type: 'file', size: 10, mtimeMs: t },
+        { rel: 'bigger.txt', type: 'file', size: 500, mtimeMs: t },
+        { rel: 'touched.txt', type: 'file', size: 5, mtimeMs: t },
+        { rel: 'legacy.txt', type: 'file', size: 5 },
+      ],
+    };
+    const { unchanged, toRestore } = planRestoreDiff(manifest, dir);
+    assert.deepEqual(unchanged.map((e) => e.rel), ['ok.txt', 'legacy.txt'], 'identical files skipped');
+    assert.deepEqual(toRestore.map((e) => e.rel), ['missing.txt', 'bigger.txt', 'touched.txt'], 'missing/size/mtime flagged');
+    // Directories never count as restorable files.
+    const empty = planRestoreDiff({ entries: [{ rel: 'd', type: 'dir', size: 0, loc: [] }] }, dir);
+    assert.equal(empty.unchanged.length, 0);
+    assert.equal(empty.toRestore.length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('walkFiles records mtimeMs for diff-aware restore', async () => {
+  const { walkFiles } = await import('../src/storage/allocator.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pbb-walk-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'a.bin'), 'x');
+    const found = walkFiles(dir).find((e) => e.rel === 'a.bin');
+    assert.ok(found, 'walked the file');
+    assert.ok(typeof found.mtimeMs === 'number' && found.mtimeMs > 0, 'records a positive mtimeMs');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 test('parseTransferFrame reads rclone byte progress but ignores the file-count frame', async () => {
   const { parseTransferFrame } = await import('../src/storage/rclone.js');
   const MB = 1024 * 1024;

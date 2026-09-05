@@ -60,8 +60,12 @@ export async function restoreSnapshot({ id, accounts, cfg, toDir, confirm = fals
 
   if (missingFromChain.length === 0) {
     console.log(`✓ All snapshots already present locally.`);
+    console.log(`⚠ This machine already has this snapshot (and its whole chain).`);
+    console.log(`  If the system hasn't changed since this backup, restoring is effectively a`);
+    console.log(`  no-op — but Timeshift will STILL overwrite the entire running system with the`);
+    console.log(`  snapshot content and update the bootloader. On a fresh install this is exactly`);
+    console.log(`  what you want; on this same machine you can safely abort now.`);
   } else {
-    // Download and receive each missing snapshot in order (oldest to newest)
     console.log(`\n⬇ Downloading ${missingFromChain.length} snapshot(s)...`);
     for (const snapId of missingFromChain) {
       await downloadAndReceiveSnapshot({ snapId, accounts, cfg, privileged, onProgress });
