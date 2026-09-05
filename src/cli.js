@@ -165,12 +165,17 @@ async function restoreFlow(rest) {
     p.log.warn('No accounts configured — cannot reach the cloud backups. Run `parrot-blackbox account add` first.');
     return;
   }
+  // Rescue paths first: System Snapshot and Urgent backup. The daily "Files"
+  // flow shows only when that job is enabled, keeping this a clean two-option
+  // restore for the default setup.
   const kind = rest[0] || (await p.select({
     message: 'Restore what?',
     options: [
       { value: 'snapshot', label: 'System snapshot (Timeshift) — overwrites the whole system', hint: '[sudo]' },
-      { value: 'files', label: 'File backup — recover fonts/images/docs into a folder' },
       { value: 'urgent', label: 'Urgent backup — user files + tool profiles (fresh install)' },
+      ...(cfg.jobs?.files?.enabled
+        ? [{ value: 'files', label: 'File backup — recover fonts/images/docs into a folder' }]
+        : []),
     ],
   }));
   if (p.isCancel(kind)) return;

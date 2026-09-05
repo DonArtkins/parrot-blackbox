@@ -15,6 +15,7 @@ import { execa } from 'execa';
 import { catRemote, lsjson, purge, copyToFile, downloadBatch } from './rclone.js';
 import { MANIFEST_NAME } from './allocator.js';
 import { isValidBtrfsStreamManifest } from '../backup/btrfs-send.js';
+import { manifestsDir } from '../core/paths.js';
 
 export { MANIFEST_NAME };
 
@@ -28,8 +29,10 @@ function isPhantom(kind, manifest) {
   return kind === 'snapshots' && manifest.schema === 2 && !isValidBtrfsStreamManifest(manifest);
 }
 
-function manifestMirrorPath(kind, id) {
-  const dir = process.env.PBB_MANIFESTS_DIR || path.join(process.env.PBB_STATE_DIR || '.', 'manifests');
+export function manifestMirrorPath(kind, id) {
+  // Canonical state dir, NOT a CWD-relative `./manifests` (which would land in
+  // the user's home as stray junk and break the mirror fallback).
+  const dir = process.env.PBB_MANIFESTS_DIR || manifestsDir();
   return path.join(dir, `${kind}-${id}.json`);
 }
 

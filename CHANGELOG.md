@@ -1,5 +1,29 @@
 # Changelog
 
+## [2.2.1] - 2026-09-05
+
+### Fixed — cloud listings were silently empty on real rclone (restore found nothing)
+
+- **Root cause:** the `lsjson()` rclone wrapper passed `--json`, but `rclone
+  lsjson` outputs JSON natively and has **no** `--json` flag — real rclone
+  rejected every call with `unknown flag: --json`. That made **every** cloud
+  listing silently return nothing: `list files`, the wizard's List backups,
+  prune, and the restore pickers all reported "none" even though the backups
+  were uploaded (files were on the MEGA account, but the tool couldn't see
+  them). The sandbox never caught it because the stub rclone ignores unknown
+  `-*` flags.
+- **Fix:** drop the invalid flag (new `lsjsonArgs()` helper) + a regression test
+  asserting the args **never** contain `--json`.
+- **Manifest mirror path fix:** local manifest mirrors now land in the canonical
+  state dir (`~/.local/state/parrot-blackbox/manifests`) instead of a
+  CWD-relative `./manifests` in the user's home — the mirror fallback, snapshot
+  resume and incremental-parent detection all read from the canonical location
+  and were silently missing it.
+- **Restore menu** is now a clean two-option rescue flow: **💽 System snapshot**
+  and **⚡ Urgent backup** (📄 Files appears only when the daily file job is
+  enabled). Restoring urgent now actually lists and restores your backups.
+- New e2e test proving an urgent backup appears under "Cloud urgent backups".
+
 ## [2.2.0] - 2026-09-04
 
 ### Added — ⚡ Urgent backup resumes an interrupted upload

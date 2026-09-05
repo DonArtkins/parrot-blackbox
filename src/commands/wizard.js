@@ -371,14 +371,20 @@ async function restoreMenu() {
   const accs = listAccounts();
   if (!accs.length) { p.log.warn('No cloud accounts configured yet.'); return; }
   const cfg = loadConfig();
+  // The two rescue paths come first: System Snapshot and Urgent backup. The
+  // daily "Files" flow shows only when that job is actually enabled, so this
+  // stays a clean two-option restore for the default setup.
+  const options = [
+    { value: 'snapshot', label: '💽 System snapshot', hint: 'full system restore [sudo]' },
+    { value: 'urgent', label: '⚡ Urgent backup', hint: 'user files + tool profiles (fresh install)' },
+  ];
+  if (cfg.jobs?.files?.enabled) {
+    options.push({ value: 'files', label: '📄 Files', hint: 'recover documents, images, etc.' });
+  }
+  options.push({ value: 'back', label: '← Back' });
   const kind = await p.select({
     message: '♻️  Restore backup',
-    options: [
-      { value: 'files', label: '📄 Files', hint: 'recover documents, images, etc.' },
-      { value: 'urgent', label: '⚡ Urgent backup', hint: 'user files + tool profiles (fresh install)' },
-      { value: 'snapshot', label: '💽 System snapshot', hint: 'full system restore [sudo]' },
-      { value: 'back', label: '← Back' },
-    ],
+    options,
   });
   if (p.isCancel(kind) || kind === 'back') return;
 

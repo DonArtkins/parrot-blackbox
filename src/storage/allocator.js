@@ -24,6 +24,7 @@ import { createWriteStream } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { copyToFile, copyBatch, mkdirRemote } from './rclone.js';
 import { bytesHuman } from '../util/misc.js';
+import { manifestsDir } from '../core/paths.js';
 
 export { bytesHuman };
 export const GiB = 1024 ** 3;
@@ -235,7 +236,7 @@ export async function planAndPlace(localDir, { kind, id, accounts, remoteRoot, c
   }
 
   // Manifest: cloud + local mirror.
-  const manifestLocalDir = process.env.PBB_MANIFESTS_DIR || path.join(process.env.PBB_STATE_DIR || '.', 'manifests');
+  const manifestLocalDir = process.env.PBB_MANIFESTS_DIR || manifestsDir();
   const manifestLocalPath = path.join(manifestLocalDir, `${kind}-${id}.json`);
   fs.mkdirSync(manifestLocalDir, { recursive: true });
   fs.writeFileSync(manifestLocalPath, JSON.stringify(manifest, null, 2));
@@ -379,7 +380,7 @@ export async function planAndPlaceStream(btrfsStream, { kind, id, accounts, remo
   };
 
   // Manifest: cloud + local mirror.
-  const manifestLocalDir = process.env.PBB_MANIFESTS_DIR || path.join(process.env.PBB_STATE_DIR || '.', 'manifests');
+  const manifestLocalDir = process.env.PBB_MANIFESTS_DIR || manifestsDir();
   const manifestLocalPath = path.join(manifestLocalDir, `${kind}-${id}.json`);
   fs.mkdirSync(manifestLocalDir, { recursive: true });
   fs.writeFileSync(manifestLocalPath, JSON.stringify(manifest, null, 2));

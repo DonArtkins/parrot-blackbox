@@ -472,6 +472,27 @@ test('restore snapshot: downloads cloud snapshot & hands to timeshift --restore'
   assert.equal(accept.exitCode, 0, accept.stdout.substring(0, 500));
   assert.ok(/Restoring|restore/i.test(accept.stdout), accept.stdout);
 });
+test('urgent backup is recognized by `list files` (cloud urgent section)', async () => {
+  const s = setupSandbox('urgentlist');
+  populateHome(s);
+  addRemote(s.env, { remote: 'megaLst', quotaGiB: 20 });
+  const add = await runCli(['account', 'add', 'mega', 'megaLst'], s.env);
+  assert.equal(add.exitCode, 0, add.stdout + add.stderr);
+
+  const up = await runCli(['urgent'], s.env);
+  assert.equal(up.exitCode, 0, up.stdout + up.stderr);
+
+  const mf = fs.readdirSync(path.join(s.env.PBB_STATE_DIR, 'manifests'))
+    .find((f) => f.startsWith('urgent-'));
+  assert.ok(mf, 'urgent manifest mirror exists');
+  const id = mf.slice('urgent-'.length, -'.json'.length);
+
+  const l = await runCli(['list', 'files'], s.env);
+  assert.equal(l.exitCode, 0, l.stdout + l.stderr);
+  assert.ok(/Cloud urgent backups:/i.test(l.stdout), `expected urgent section:\n${l.stdout}`);
+  assert.ok(l.stdout.includes(id), `expected urgent id ${id} listed:\n${l.stdout}`);
+});
+
 test('urgent upload resumes an interrupted generation (reuses the pending id)', async () => {
   const s = setupSandbox('urgentresume');
   populateHome(s);

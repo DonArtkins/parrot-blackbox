@@ -408,6 +408,38 @@ test('urgent sources collect correctly in a sandbox home (git repos skipped, fil
   assert.ok(col.skippedRepos.some((r) => r.endsWith('gitproj')), 'git repo reported as skipped');
   // Sources absent from the sandbox (e.g. no VSCodium install) are tolerated.
   assert.ok(Array.isArray(col.missing), 'missing sources tolerated');
+});
+test('lsjson args must NEVER include --json (real rclone rejects that flag)', async () => {
+  const { lsjsonArgs } = await import('../src/storage/rclone.js');
+  const rec = lsjsonArgs('mega-1:parrot-blackbox/urgent', { recursive: true });
+  assert.deepEqual(rec, ['lsjson', 'mega-1:parrot-blackbox/urgent', '--recursive'], 'recursive args');
+  assert.ok(!rec.includes('--json'), 'recursive must not carry --json');
+  const flat = lsjsonArgs('mega-1:root', { recursive: false });
+  assert.deepEqual(flat, ['lsjson', 'mega-1:root'], 'non-recursive args');
+  assert.ok(!flat.includes('--json'), 'non-recursive must not carry --json');
+});
+
+test('manifest mirror resolves to the canonical state dir, never CWD ./manifests', async () => {
+  const { manifestMirrorPath } = await import('../src/storage/archive.js');
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pbb-mirror-'));
+  const prevHome = process.env.HOME;
+  const prevState = process.env.PBB_STATE_DIR;
+  try {
+    process.env.HOME = tmpHome;
+    delete process.env.PBB_STATE_DIR;
+    delete process.env.PBB_MANIFESTS_DIR;
+    // When run from any CWD, the mirror must live under the user state dir.
+    const p = manifestMirrorPath('urgent', '2026-09-04T19:44:39');
+    assert.ok(p.startsWith(path.join(tmpHome, '.local', 'state', 'parrot-blackbox', 'manifests')),
+      `expected canonical state path, got ${p}`);
+    assert.ok(!p.startsWith(path.resolve('.')), 'must never be CWD-relative');
+  } finally {
+    process.env.HOME = prevHome;
+    if (prevState === undefined) delete process.env.PBB_STATE_DIR; else process.env.PBB_STATE_DIR = prevState;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+});
+
 test('parseTransferFrame reads rclone byte progress but ignores the file-count frame', async () => {
   const { parseTransferFrame } = await import('../src/storage/rclone.js');
   const MB = 1024 * 1024;
@@ -424,5 +456,4 @@ test('parseTransferFrame reads rclone byte progress but ignores the file-count f
   // Final 100% frame.
   const finalFrame = 'Transferred:   	       12 MiB / 12 MiB, 100%, 3.018 MiB/s, ETA 0s';
   assert.deepEqual(parseTransferFrame(finalFrame), { done: 12 * MB, total: 12 * MB }, 'parses final 100% frame');
-});
 });

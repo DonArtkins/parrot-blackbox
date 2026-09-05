@@ -43,12 +43,18 @@ export async function listRemotes() {
   return res.stdout.split('\n').map((l) => l.trim().replace(/:$/, '')).filter(Boolean);
 }
 
-/** Recursive JSON listing of a remote path. */
-export async function lsjson(remotePath, { recursive = true } = {}) {
+/** Build args for `rclone lsjson`. IMPORTANT: lsjson outputs JSON natively and
+ *  has NO `--json` flag — passing one makes real rclone fail with
+ *  "unknown flag: --json", which silently emptied every cloud listing. */
+export function lsjsonArgs(remotePath, { recursive = true } = {}) {
   const args = ['lsjson', remotePath];
   if (recursive) args.push('--recursive');
-  args.push('--json');
-  const res = await rejectFalse(args);
+  return args;
+}
+
+/** Recursive JSON listing of a remote path. */
+export async function lsjson(remotePath, { recursive = true } = {}) {
+  const res = await rejectFalse(lsjsonArgs(remotePath, { recursive }));
   if (res.exitCode !== 0) return { ok: false, entries: [], error: res.stderr?.trim() };
   try {
     return { ok: true, entries: JSON.parse(res.stdout), error: null };
